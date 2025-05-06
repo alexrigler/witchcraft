@@ -20,14 +20,7 @@ struct T5ModelBuilder {
 impl T5ModelBuilder {
     pub fn load() -> Result<(Self, Tokenizer)> {
         let device = Device::Cpu;
-        //let (default_model, default_revision) = ("t5-base", "main");
-        //let default_model = default_model.to_string();
-        //let default_revision = default_revision.to_string();
-        //let (model_id, revision) = (default_model, default_revision);
-        //let repo = Repo::with_revision(model_id.clone(), RepoType::Model, revision);
-        //let api = Api::new()?;
-        //let repo = api.repo(repo);
-        let path = PathBuf::from(r"/Users/jhansen/src/xtr-warp/xtr-base-en/model.safetensors");
+        let path = PathBuf::from(r"/Users/jhansen/src/xtr-warp/foo.safetensors");
         let weights_filename = vec![path];
         let config = std::fs::read_to_string("/Users/jhansen/src/xtr-warp/xtr-base-en/config.json")?;
         let config: t5::Config = serde_json::from_str(&config)?;
@@ -52,30 +45,26 @@ impl T5ModelBuilder {
 }
 
 fn main() -> Result<()> {
-
     let (builder, tokenizer) = T5ModelBuilder::load()?;
     let model = builder.build_encoder()?;
 
-    loop {
-        let now = std::time::Instant::now();
-        let tokens = tokenizer
-            .encode("do buildings change size due to weather?", true)
-            .map_err(E::msg)?
-            .get_ids()
-            .to_vec();
-        let token_ids = Tensor::new(&tokens[..], model.device())?.unsqueeze(0)?;
-        println!("ids {}", token_ids);
-        let embeddings = model.forward(&token_ids)?;
-        let elapsed_time = now.elapsed();
-        println!("Running slow_function() took {} ms.", elapsed_time.as_millis());
-        println!("embeddings {}", embeddings);
-        //println!("embeddings {}", normalize_l2(&embeddings).unwrap());
-    }
-
+    let now = std::time::Instant::now();
+    let tokens = tokenizer
+        .encode("do buildings change size due to weather?", true)
+        .map_err(E::msg)?
+        .get_ids()
+        .to_vec();
+    let token_ids = Tensor::new(&tokens[..], model.device())?.unsqueeze(0)?;
+    println!("ids {}", token_ids);
+    let embeddings = model.forward(&token_ids)?;
+    let elapsed_time = now.elapsed();
+    println!("Running slow_function() took {} ms.", elapsed_time.as_millis());
+    println!("\nembeddings:\n{}", embeddings);
+    println!("\nembeddings l2:\n{}", normalize_l2(&embeddings).unwrap());
 
     Ok(())
 }
 
 pub fn normalize_l2(v: &Tensor) -> Result<Tensor> {
-    Ok(v.broadcast_div(&v.sqr()?.sum_keepdim(1)?.sqrt()?)?)
+    Ok(v.broadcast_div(&v.sqr()?.sum_keepdim(2)?.sqrt()?)?)
 }

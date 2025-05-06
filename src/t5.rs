@@ -577,6 +577,7 @@ struct T5Stack {
     block: Vec<T5Block>,
     shared: Arc<Embedding>,
     final_layer_norm: T5LayerNorm,
+    final_projection: Linear,
 }
 
 impl T5Stack {
@@ -589,10 +590,13 @@ impl T5Stack {
             cfg.layer_norm_epsilon,
             vb.pp("final_layer_norm"),
         )?;
+        let final_projection = linear_no_bias(768, 128, vb.pp("linear"),
+        )?;
         Ok(Self {
             block,
             shared: shared.clone(),
             final_layer_norm,
+            final_projection,
         })
     }
 
@@ -624,7 +628,8 @@ impl T5Stack {
                 encoder_hidden_states,
             )?
         }
-        self.final_layer_norm.forward(&hidden_states)
+        let t5_output = self.final_layer_norm.forward(&hidden_states);
+        self.final_projection.forward(&t5_output.unwrap())
     }
 }
 
