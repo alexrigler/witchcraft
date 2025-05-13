@@ -5,6 +5,7 @@ use serde::Deserialize;
 use sha2::{Sha256, Digest};
 use std::fs::File;
 use std::io::{BufReader, Read};
+use std::mem::size_of;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -85,9 +86,12 @@ fn kmeans(data: &Tensor, k: usize, max_iter: u32, device: &Device) -> Result<(Te
     let centroid_idx_tensor = Tensor::from_slice(centroid_idx.as_slice(), (k,), device)?;
     let mut centers = data.index_select(&centroid_idx_tensor, 0)?;
     let mut cluster_assignments = Tensor::zeros((n,), DType::U32, device)?;
-    for _ in 0..max_iter {
-        let dist = cdist(data, &centers)?;
-        cluster_assignments = dist.argmin(D::Minus1)?;
+    for i in 0..max_iter {
+        println!("i {}", i);
+        //let dist = cdist(data, &centers)?;
+        let sim = data.matmul(&centers.transpose(D::Minus1, D::Minus2)?)?;
+        println!("got sim {}", sim);
+        cluster_assignments = sim.argmax(D::Minus1)?;
         let mut centers_vec = vec![];
         for i in 0..k {
             let mut indices = vec![];
@@ -102,10 +106,12 @@ fn kmeans(data: &Tensor, k: usize, max_iter: u32, device: &Device) -> Result<(Te
                 });
             let indices = Tensor::from_slice(indices.as_slice(), (indices.len(),), device)?;
             let cluster_data = data.index_select(&indices, 0)?;
-            let mean = cluster_data.mean(0)?;
-            centers_vec.push(mean);
+            let sum = cluster_data.sum(0)?;
+            let normalized = sum.broadcast_div(&sum.sqr()?.sum_keepdim(0)?.sqrt()?);
+            centers_vec.push(normalized?);
         }
         centers = Tensor::stack(centers_vec.as_slice(), 0)?;
+        println!("centers {}", centers);
     }
     Ok((centers, cluster_assignments))
 }
@@ -172,6 +178,11 @@ struct Document {
     hash: String,
 }
 
+struct Chunk {
+    //hash: String,
+    embedding: Vec<u8>,
+}
+
 pub struct Gatherer<'a> {
     documents: Box<dyn Iterator<Item = Document> + 'a>,
     tokenizer: Tokenizer,
@@ -220,11 +231,10 @@ impl<'a> Iterator for Gatherer<'a> {
                         .to_vec();
                     let token_ids = Tensor::new(&tokens[..], self.model.device()).unwrap().unsqueeze(0).unwrap();
                     let embeddings = self.model.forward(&token_ids).unwrap();
-                    let elapsed_time = now.elapsed();
-                    println!("embedder took {} ms.", elapsed_time.as_millis());
-                    let normalized = normalize_l2(&embeddings).unwrap().get(0).unwrap();
+                    println!("embedder took {} ms.", now.elapsed().as_millis());
+                    let normalized = normalize_l2(&embeddings);
 
-                    let split = split_tensor(&normalized);
+                    let split = split_tensor(&normalized.ok()?.get(0).ok()?);
                     doc_embedding.extend(split);
                 }
                 Some((hash, stack_tensors(doc_embedding)))
@@ -260,7 +270,7 @@ impl DB {
             hash TEXT)";
         connection.execute(query, ()).unwrap();
 
-        let query = "CREATE TABLE IF NOT EXISTS chunk(hash TEXT PRIMARY KEY, embedding TEXT)";
+        let query = "CREATE TABLE IF NOT EXISTS chunk(hash TEXT PRIMARY KEY, embedding BLOB NOT NULL)";
         connection.execute(query, ()).unwrap();
         Self { connection }
     }
@@ -271,7 +281,7 @@ impl DB {
     }
 
     fn make_kmeans_query(self: &Self) -> SQLResult<Query> {
-        let stmt = self.connection.prepare("SELECT document.filename,document.state,document.hash FROM document,chunk
+        let stmt = self.connection.prepare("SELECT chunk.embedding FROM document,chunk
             WHERE document.hash == chunk.hash AND
             state = 'indexed'")?;
         Ok(Query { stmt })
@@ -282,10 +292,9 @@ impl DB {
         Ok(())
     }
 
-    fn set_embeddings(self: &Self, hash: &str, embeddings: &Tensor) -> SQLResult<()> {
-        let es = format!("{}", embeddings);
+    fn set_embeddings(self: &Self, hash: &str, embeddings: &Vec<u8>) -> SQLResult<()> {
         let tx = self.connection.unchecked_transaction()?;
-        tx.execute("INSERT OR IGNORE INTO chunk VALUES(?1, ?2)", (&hash, &es)).unwrap();
+        tx.execute("INSERT OR IGNORE INTO chunk VALUES(?1, ?2)", (&hash, embeddings)).unwrap();
         tx.execute("UPDATE document set state = 'indexed' WHERE hash == ?1", (&hash, )).unwrap();
         tx.commit()
     }
@@ -301,7 +310,43 @@ impl<'connection> Query<'connection> {
             })
         })
     }
+
+    fn iter2(&mut self) -> SQLResult<impl Iterator<Item = SQLResult<Chunk>> + '_> {
+        self.stmt.query_map([], |row| {
+            Ok(Chunk {
+                embedding: row.get(0)?,
+            })
+        })
+    }
 }
+
+fn vecvec_f32_to_u8_vec(data: &[Vec<f32>]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(data.len() * data[0].len() * std::mem::size_of::<f32>());
+    for row in data {
+        for &val in row {
+            bytes.extend_from_slice(&val.to_ne_bytes()); // native-endian encoding
+        }
+    }
+    bytes
+}
+
+pub fn u8_to_tensor2d_f32(bytes: &[u8], cols: usize) -> Tensor {
+    let f32_size = size_of::<f32>();
+
+    assert!(bytes.len() % f32_size == 0);
+    let total_f32s = bytes.len() / f32_size;
+
+    let rows = total_f32s / cols;
+
+    let mut f32s = Vec::with_capacity(total_f32s);
+    for chunk in bytes.chunks_exact(f32_size) {
+        let arr: [u8; 4] = chunk.try_into().unwrap();
+        f32s.push(f32::from_ne_bytes(arr));
+    }
+
+    Tensor::from_vec(f32s, (rows, cols), &Device::Cpu).unwrap()
+}
+
 
 fn main() -> Result<()> {
     let (builder, tokenizer) = T5ModelBuilder::load()?;
@@ -311,21 +356,36 @@ fn main() -> Result<()> {
     let mut query = db.make_query()?;
     let mut kmeans_query = db.make_kmeans_query()?;
 
-    register_documents(&db, "documents");
+    register_documents(&db, "documents").unwrap();
 
     let embedding_iter = Gatherer::new(&mut query, model, tokenizer);
     for (hash, embeddings) in embedding_iter {
-        db.set_embeddings(&hash, &embeddings);
+        //println!("for hash {} {:?}", hash, embeddings.dims2().unwrap());
+        //let (b, n) = embeddings.dims2().unwrap();
+        let vec = embeddings.to_vec2::<f32>();
+        let bytes = vecvec_f32_to_u8_vec(&vec?);
+        db.set_embeddings(&hash, &bytes).unwrap();
     }
 
-    for (document) in kmeans_query.iter()? {
-        println!("iter hash {}", document?.hash);
+    let mut all_embeddings = vec![];
+    for chunk in kmeans_query.iter2()? {
+        let t = u8_to_tensor2d_f32(&chunk?.embedding, 128);
+        let split = split_tensor(&t);
+        all_embeddings.extend(split);
+        //println!("iter len {}", chunk?.embedding.len());
     }
+    let device = Device::Cpu;
+    let matrix = stack_tensors(all_embeddings);
+    let now = std::time::Instant::now();
+    let (_, idxs) = kmeans(&matrix, 1024, 5, &device)?;
+    let elapsed_time = now.elapsed();
+    println!("kmeans took {} ms.", elapsed_time.as_millis());
+    println!("idxs {}", idxs);
+    //println!("idxs {}", idxs);
+    //println!("v {:?}", all_embeddings);
 
     //let matrix = gather_embeddings(&mut query, model, tokenizer)?;
-    //let device = Device::Cpu;
     //let (_, idxs) = kmeans(&matrix, 16, 5, &device)?;
-    //println!("idxs {}", idxs);
 
     Ok(())
 }
