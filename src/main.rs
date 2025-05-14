@@ -112,6 +112,35 @@ fn kmeans(data: &Tensor, k: usize, max_iter: u32, device: &Device) -> Result<(Te
     Ok((centers, cluster_assignments))
 }
 
+fn write_clusters(db: &DB, data: &Tensor, centers: &Tensor, device: &Device) -> Result<()> {
+    let (k, _) = centers.dims2()?;
+    println!("k={}", k);
+
+    let sim = data.matmul(&centers.transpose(D::Minus1, D::Minus2)?)?;
+    let cluster_assignments = sim.argmax(D::Minus1)?;
+    for i in 0..k {
+        let center = centers.get(i)?;
+        let mut indices = vec![];
+        cluster_assignments
+            .to_vec1::<u32>()?
+            .iter()
+            .enumerate()
+            .for_each(|(j, x)| {
+                if *x == i as u32 {
+                    indices.push(j as u32);
+                }
+            });
+        let data_indices = Tensor::from_slice(indices.as_slice(), (indices.len(),), device)?;
+        let cluster_data = data.index_select(&data_indices, 0)?;
+
+        let vec = cluster_data.to_vec2::<f32>();
+        let bytes = vecvec_f32_to_u8_vec(&vec?);
+
+        db.set_token(i as u32, "<no hash>", &bytes).unwrap();
+    }
+    Ok(())
+}
+
 fn match_centroids(embeddings: &Tensor, centers: &Tensor) -> Result<()> {
     println!("match em");
     let sim = embeddings.matmul(&centers.transpose(D::Minus1, D::Minus2)?).unwrap();
@@ -290,6 +319,9 @@ impl DB {
 
         let query = "CREATE TABLE IF NOT EXISTS chunk(hash TEXT PRIMARY KEY, embedding BLOB NOT NULL)";
         connection.execute(query, ()).unwrap();
+
+        let query = "CREATE TABLE IF NOT EXISTS token(bucket INTEGER, hash TEXT, embedding BLOB NOT NULL)";
+        connection.execute(query, ()).unwrap();
         Self { connection }
     }
 
@@ -318,6 +350,11 @@ impl DB {
         tx.execute("UPDATE document set state = 'indexed' WHERE hash == ?1", (&hash, )).unwrap();
         tx.commit()
     }
+
+    fn set_token(self: &Self, bucket: u32, hash: &str, embedding: &Vec<u8>) -> SQLResult<()> {
+        self.connection.execute("INSERT OR IGNORE INTO token VALUES(?1, ?2, ?3)", (bucket, &hash, embedding))?;
+        Ok(())
+    }
 }
 
 impl<'connection> Query<'connection> {
@@ -339,6 +376,14 @@ impl<'connection> Query<'connection> {
             ))
         })
     }
+}
+
+fn vec_f32_to_u8_vec(data: &Vec<f32>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(data.len() * data.len() * std::mem::size_of::<f32>());
+    for &val in data {
+        bytes.extend_from_slice(&val.to_ne_bytes()); // native-endian encoding
+    }
+    bytes
 }
 
 fn vecvec_f32_to_u8_vec(data: &[Vec<f32>]) -> Vec<u8> {
@@ -386,9 +431,11 @@ fn main() -> Result<()> {
         db.set_embeddings(&hash, &bytes).unwrap();
     }
 
+    let mut all_filenames : Vec<String> = Vec::new();
     let mut all_embeddings = vec![];
     for result in kmeans_query.iter2()? {
-        let (_filename, embedding) = result?;
+        let (filename, embedding) = result?;
+        all_filenames.push(filename);
         let t = u8_to_tensor2d_f32(&embedding, 128);
         let split = split_tensor(&t);
         all_embeddings.extend(split);
@@ -401,6 +448,8 @@ fn main() -> Result<()> {
     let elapsed_time = now.elapsed();
     println!("kmeans took {} ms.", elapsed_time.as_millis());
     println!("idxs {}", idxs);
+
+    write_clusters(&db, &matrix, &centers, &device).unwrap();
 
 
     let qe = embedder.embed("do children benefit from breast-feeding?")?.get(0)?;
