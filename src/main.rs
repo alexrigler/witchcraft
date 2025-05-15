@@ -1,3 +1,4 @@
+use std::env;
 use rand::prelude::*;
 use rusqlite::{Connection, Statement, Result as SQLResult};
 use scan_dir::ScanDir;
@@ -133,20 +134,42 @@ fn write_clusters(db: &DB, data: &Tensor, centers: &Tensor, device: &Device) -> 
         let data_indices = Tensor::from_slice(indices.as_slice(), (indices.len(),), device)?;
         let cluster_data = data.index_select(&data_indices, 0)?;
 
-        let vec = cluster_data.to_vec2::<f32>();
-        let bytes = vecvec_f32_to_u8_vec(&vec?);
+        let vec = center.to_vec1::<f32>();
+        let center_bytes = vec_f32_to_u8_vec(&vec?);
 
-        db.set_token(i as u32, "<no hash>", &bytes).unwrap();
+        println!("indices vec {}", data_indices);
+        let vec = data_indices.to_vec1::<u32>();
+        let indices_bytes = vec_u32_to_u8_vec(&vec?);
+
+        let vec = cluster_data.to_vec2::<f32>();
+        let embeddings_bytes = vecvec_f32_to_u8_vec(&vec?);
+
+        db.add_bucket(i as u32, &center_bytes, &indices_bytes, &embeddings_bytes).unwrap();
     }
     Ok(())
 }
 
-fn match_centroids(embeddings: &Tensor, centers: &Tensor) -> Result<()> {
+fn match_centroids(bucket_query: &mut Query, query_embeddings: &Tensor, centers: &Tensor) -> Result<()> {
     println!("match em");
-    let sim = embeddings.matmul(&centers.transpose(D::Minus1, D::Minus2)?).unwrap();
-    println!("sim {}", sim);
+    let sim = query_embeddings.matmul(&centers.transpose(D::Minus1, D::Minus2)?).unwrap();
+    println!("shape {:?}", sim.dims2()?);
     let cluster_assignments = sim.argmax(D::Minus1)?;
     println!("got centroids {}", cluster_assignments);
+    for i in cluster_assignments.to_vec1::<u32>()? {
+
+        for result in bucket_query.iter3(i)? {
+            let (indices, embeddings) = result?;
+            let indices = u8_to_tensor2d_u32_1d(&indices);
+            println!("indices {}", indices);
+            let embeddings = u8_to_tensor2d_f32(&embeddings, 128);
+            let sim = query_embeddings.matmul(&embeddings.transpose(D::Minus1, D::Minus2)?)?;
+            let assignments = sim.argmax(D::Minus1)?;
+            let best_indices = indices.index_select(&assignments, 0)?;
+
+            println!("best {}", best_indices);
+            //println!("iter len {}", chunk?.embedding.len());
+        }
+    }
     Ok(())
 }
 
@@ -320,14 +343,15 @@ impl DB {
         let query = "CREATE TABLE IF NOT EXISTS chunk(hash TEXT PRIMARY KEY, embedding BLOB NOT NULL)";
         connection.execute(query, ()).unwrap();
 
-        let query = "CREATE TABLE IF NOT EXISTS token(bucket INTEGER, hash TEXT, embedding BLOB NOT NULL)";
+        let query = "CREATE TABLE IF NOT EXISTS bucket(id INTEGER PRIMARY KEY,
+            center BLOB NOT NULL, indices BLOB NOT NULL, embeddings BLOB NOT NULL)";
         connection.execute(query, ()).unwrap();
         Self { connection }
     }
 
     fn make_query(self: &Self) -> SQLResult<Query> {
         let stmt = self.connection.prepare("SELECT filename,state,hash FROM document WHERE state = 'new'
-            ORDER BY hash")?;
+            ORDER BY filename")?;
         Ok(Query { stmt })
     }
 
@@ -335,7 +359,18 @@ impl DB {
         let stmt = self.connection.prepare("SELECT document.filename,chunk.embedding FROM document,chunk
             WHERE document.hash == chunk.hash AND
             state = 'indexed'
-            ORDER BY chunk.hash")?;
+            ORDER BY document.filename")?;
+        Ok(Query { stmt })
+    }
+
+    fn make_bucket_center_query(self: &Self) -> SQLResult<Query> {
+        let stmt = self.connection.prepare("SELECT center FROM bucket ORDER BY id")?;
+        Ok(Query { stmt })
+    }
+
+    fn make_bucket_embeddings_query(self: &Self) -> SQLResult<Query> {
+        let stmt = self.connection.prepare("SELECT indices,embeddings FROM bucket
+            WHERE id = ?1")?;
         Ok(Query { stmt })
     }
 
@@ -346,13 +381,13 @@ impl DB {
 
     fn set_embeddings(self: &Self, hash: &str, embeddings: &Vec<u8>) -> SQLResult<()> {
         let tx = self.connection.unchecked_transaction()?;
-        tx.execute("INSERT OR IGNORE INTO chunk VALUES(?1, ?2)", (&hash, embeddings)).unwrap();
+        tx.execute("INSERT OR REPLACE INTO chunk VALUES(?1, ?2)", (&hash, embeddings)).unwrap();
         tx.execute("UPDATE document set state = 'indexed' WHERE hash == ?1", (&hash, )).unwrap();
         tx.commit()
     }
 
-    fn set_token(self: &Self, bucket: u32, hash: &str, embedding: &Vec<u8>) -> SQLResult<()> {
-        self.connection.execute("INSERT OR IGNORE INTO token VALUES(?1, ?2, ?3)", (bucket, &hash, embedding))?;
+    fn add_bucket(self: &Self, id: u32, center: &Vec<u8>, indices: &Vec<u8>, embeddings: &Vec<u8>) -> SQLResult<()> {
+        self.connection.execute("INSERT OR REPLACE INTO bucket VALUES(?1, ?2, ?3, ?4)", (id, center, indices, embeddings))?;
         Ok(())
     }
 }
@@ -376,18 +411,51 @@ impl<'connection> Query<'connection> {
             ))
         })
     }
+
+    fn iter3(&mut self, id: u32) -> SQLResult<impl Iterator<Item = SQLResult<(Vec<u8>, Vec<u8>)>> + '_> {
+        self.stmt.query_map([id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+            ))
+        })
+    }
+
+    fn iter4(&mut self) -> SQLResult<impl Iterator<Item = SQLResult<Vec<u8>>> + '_> {
+        self.stmt.query_map([], |row| {
+            Ok( row.get(0)? )
+        })
+    }
 }
 
 fn vec_f32_to_u8_vec(data: &Vec<f32>) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(data.len() * data.len() * std::mem::size_of::<f32>());
     for &val in data {
-        bytes.extend_from_slice(&val.to_ne_bytes()); // native-endian encoding
+        bytes.extend(&val.to_ne_bytes()); // native-endian encoding
     }
     bytes
 }
 
 fn vecvec_f32_to_u8_vec(data: &[Vec<f32>]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(data.len() * data[0].len() * std::mem::size_of::<f32>());
+    for row in data {
+        for &val in row {
+            bytes.extend_from_slice(&val.to_ne_bytes()); // native-endian encoding
+        }
+    }
+    bytes
+}
+
+fn vec_u32_to_u8_vec(data: &Vec<u32>) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(data.len() * data.len() * std::mem::size_of::<u32>());
+    for &val in data {
+        bytes.extend_from_slice(&val.to_ne_bytes()); // native-endian encoding
+    }
+    bytes
+}
+
+fn vecvec_u32_to_u8_vec(data: &[Vec<u32>]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(data.len() * data[0].len() * std::mem::size_of::<u32>());
     for row in data {
         for &val in row {
             bytes.extend_from_slice(&val.to_ne_bytes()); // native-endian encoding
@@ -413,12 +481,49 @@ pub fn u8_to_tensor2d_f32(bytes: &[u8], cols: usize) -> Tensor {
     Tensor::from_vec(f32s, (rows, cols), &Device::Cpu).unwrap()
 }
 
+pub fn u8_to_tensor2d_u32(bytes: &[u8], cols: usize) -> Tensor {
+    let u32_size = size_of::<u32>();
+
+    assert!(bytes.len() % u32_size == 0);
+    let total_u32s = bytes.len() / u32_size;
+
+    let rows = total_u32s / cols;
+
+    let mut u32s = Vec::with_capacity(total_u32s);
+    for chunk in bytes.chunks_exact(u32_size) {
+        let arr: [u8; 4] = chunk.try_into().unwrap();
+        u32s.push(u32::from_ne_bytes(arr));
+    }
+
+    Tensor::from_vec(u32s, (rows, cols), &Device::Cpu).unwrap()
+}
+
+pub fn u8_to_tensor2d_u32_1d(bytes: &[u8]) -> Tensor {
+    let u32_size = size_of::<u32>();
+
+    assert!(bytes.len() % u32_size == 0);
+    let total_u32s = bytes.len() / u32_size;
+
+    let mut u32s = Vec::with_capacity(total_u32s);
+    for chunk in bytes.chunks_exact(u32_size) {
+        let arr: [u8; 4] = chunk.try_into().unwrap();
+        u32s.push(u32::from_ne_bytes(arr));
+    }
+
+    Tensor::from_vec(u32s, (total_u32s), &Device::Cpu).unwrap()
+}
+
 fn main() -> Result<()> {
+
+    let args: Vec<String> = env::args().collect();
+    let device = Device::Cpu;
 
     let embedder = Embedder::new();
     let db = DB::new();
     let mut query = db.make_query()?;
     let mut kmeans_query = db.make_kmeans_query()?;
+    let mut bucket_query = db.make_bucket_embeddings_query()?;
+    let mut center_query = db.make_bucket_center_query()?;
 
     register_documents(&db, "documents").unwrap();
 
@@ -431,29 +536,43 @@ fn main() -> Result<()> {
         db.set_embeddings(&hash, &bytes).unwrap();
     }
 
-    let mut all_filenames : Vec<String> = Vec::new();
-    let mut all_embeddings = vec![];
-    for result in kmeans_query.iter2()? {
-        let (filename, embedding) = result?;
-        all_filenames.push(filename);
-        let t = u8_to_tensor2d_f32(&embedding, 128);
-        let split = split_tensor(&t);
-        all_embeddings.extend(split);
-        //println!("iter len {}", chunk?.embedding.len());
+    if args.len() == 2 && args[1] == "index" {
+        let mut all_filenames : Vec<String> = Vec::new();
+        let mut all_embeddings = vec![];
+        for result in kmeans_query.iter2()? {
+            let (filename, embedding) = result?;
+            println!("filename {} start at {}", filename, all_embeddings.len());
+            all_filenames.push(filename);
+            let t = u8_to_tensor2d_f32(&embedding, 128);
+            let split = split_tensor(&t);
+            all_embeddings.extend(split);
+            //println!("iter len {}", chunk?.embedding.len());
+        }
+        let matrix = stack_tensors(all_embeddings);
+        println!("kmeans...");
+        let now = std::time::Instant::now();
+        //let (centers, idxs) = kmeans(&matrix, 1024, 5, &device)?;
+        let k = 6;
+        let (centers, idxs) = kmeans(&matrix, k, 5, &device)?;
+        println!("kmeans took {} ms.", now.elapsed().as_millis());
+        println!("idxs {}", idxs);
+
+        println!("write buckets...");
+        let now = std::time::Instant::now();
+        write_clusters(&db, &matrix, &centers, &device).unwrap();
+        println!("write buckets took {} ms.", now.elapsed().as_millis());
     }
-    let device = Device::Cpu;
-    let matrix = stack_tensors(all_embeddings);
-    let now = std::time::Instant::now();
-    let (centers, idxs) = kmeans(&matrix, 1024, 5, &device)?;
-    let elapsed_time = now.elapsed();
-    println!("kmeans took {} ms.", elapsed_time.as_millis());
-    println!("idxs {}", idxs);
 
-    write_clusters(&db, &matrix, &centers, &device).unwrap();
+    let mut centers = vec![];
+    for center in center_query.iter4()? {
+        let t = u8_to_tensor2d_f32(&center?, 128);
+        let split = split_tensor(&t);
+        centers.extend(split);
+    }
+    let centers = stack_tensors(centers);
 
-
-    let qe = embedder.embed("do children benefit from breast-feeding?")?.get(0)?;
-    let _ = match_centroids(&qe, &centers).unwrap();
+    let qe = embedder.embed("do buildings change size due to weather?")?.get(0)?;
+    let _ = match_centroids(&mut bucket_query, &qe, &centers).unwrap();
 
 
     //println!("idxs {}", idxs);
