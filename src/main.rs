@@ -153,6 +153,7 @@ fn match_centroids(
         query_embeddings: &Tensor,
         centers: &Tensor) -> Result<()> {
     println!("******************** LOOKUP **********************\n");
+    let now = std::time::Instant::now();
 
     let k = 16;
     let t_prime = 10000;
@@ -182,15 +183,19 @@ fn match_centroids(
                 score = row_scores_sorted.get(j)?.to_scalar::<f32>()?;
             }
             cumsum += size;
+
+            if j >= k || cumsum >= t_prime {
+                break;
+            }
         }
         missing.push(score);
     }
     topk_clusters.sort();
     topk_clusters.dedup();
     let missing_similarities = Tensor::from_vec(missing, m, &Device::Cpu)?;
+    println!("finding top-{} clusters took {} ms.", topk_clusters.len(), now.elapsed().as_millis());
 
-    println!("missing_similarities {}", missing_similarities);
-
+    let now = std::time::Instant::now();
     let mut heap = MinHeap::new();
 
     let mut all_document_embeddings = vec![];
@@ -218,16 +223,18 @@ fn match_centroids(
     while let Some((idx, i)) = heap.pop() {
 
         if last != idx || heap.len() == 0 {
-            let score = current.sum(0)?.to_scalar::<f32>()?;
-            let score_as_u32 = (1000.0 * score) as u32;
-            let elem = (score_as_u32, last);
-            if heap2.len() < 10 {
-                heap2.push(elem);
-            } else {
-                let min = heap2.peek().unwrap();
-                if *min < elem {
-                    heap2.pop();
+            let score = current.mean(0)?.to_scalar::<f32>()?;
+            if score >= 0.8 {
+                let score_as_u32 = (1000.0 * score) as u32;
+                let elem = (score_as_u32, last);
+                if heap2.len() < 10 {
                     heap2.push(elem);
+                } else {
+                    let min = heap2.peek().unwrap();
+                    if *min < elem {
+                        heap2.pop();
+                        heap2.push(elem);
+                    }
                 }
             }
         }
@@ -241,6 +248,8 @@ fn match_centroids(
 
         last = idx;
     }
+    println!("scoring clusters took {} ms.", now.elapsed().as_millis());
+    println!("");
 
     let mut results = heap2.into_vec();
     results.reverse();
