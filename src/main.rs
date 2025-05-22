@@ -129,6 +129,13 @@ fn write_buckets(db: &DB,
         let data_indices = data_indices.to_device(data.device())?;
         let cluster_data = data.index_select(&data_indices, 0)?;
 
+        let residuals = cluster_data.broadcast_sub(&center).unwrap();
+        let qmin = 0.0;
+        let qmax = 15.0;
+        let scale1 = 16.0 / 2.0;
+        let zp = (qmax - qmin) / 2.0;
+        let residuals = ((&residuals * scale1)? + zp)?.round()?.clamp(qmin, qmax)?;
+
         let vec = center.to_vec1::<f32>().unwrap();
         let center_bytes = vec_f32_to_u8_vec(&vec);
 
@@ -136,10 +143,9 @@ fn write_buckets(db: &DB,
         let vec = document_subset.to_vec1::<u32>().unwrap();
         let indices_bytes = vec_u32_to_u8_vec(&vec);
 
-        let vec = cluster_data.flatten_all()?.to_vec1::<f32>().unwrap();
-        let embeddings_bytes = vec_f32_to_u8_vec(&vec);
+        let residuals_bytes = residuals.to_4bit_u8()?;
 
-        db.add_bucket(i as u32, &center_bytes, &indices_bytes, &embeddings_bytes).unwrap();
+        db.add_bucket(i as u32, &center_bytes, &indices_bytes, &residuals_bytes).unwrap();
         bar.inc(1);
     }
     bar.finish();
@@ -160,7 +166,8 @@ fn match_centroids(
 
     let sizes = bucket_sizes_query.u32_vec()?;
 
-    let centers = centers.to_device(query_embeddings.device())?;
+    let device = query_embeddings.device();
+    let centers = centers.to_device(&device)?;
     let query_centroid_similarity = query_embeddings.matmul(&centers.transpose(D::Minus1, D::Minus2)?).unwrap();
 
     let sorted_indices = query_centroid_similarity.arg_sort_last_dim(false)?;
@@ -201,12 +208,23 @@ fn match_centroids(
     let mut all_document_embeddings = vec![];
     for i in topk_clusters {
         let (document_indices, document_embeddings) = bucket_query.point3(i)?;
+        let center = centers.get(i as usize)?;
+        let center = center.to_device(&device)?;
+
         let document_indices = u8_to_vec_u32(&document_indices);
-        let document_embeddings = u8_to_tensor2d_f32(&document_embeddings, 128);
-        let (m, _) = document_embeddings.dims2()?;
+
+        let residuals = Tensor::from_4bit_u8(&document_embeddings, 128, &device).unwrap();
+        let qmin = 0.0;
+        let qmax = 15.0;
+        let scale2 = 2.0 / 16.0;
+        let zp = (qmax - qmin) / 2.0;
+        let residuals = ((&residuals - zp)? * scale2)?;
+        let embeddings = residuals.broadcast_add(&center)?;
+
+        let (m, _) = residuals.dims2()?;
         for j in 0..m {
             heap.push((document_indices[j], all_document_embeddings.len()));
-            all_document_embeddings.push(document_embeddings.get(j)?);
+            all_document_embeddings.push(embeddings.get(j)?);
         }
     }
 
@@ -414,7 +432,7 @@ impl DB {
         connection.execute(query, ()).unwrap();
 
         let query = "CREATE TABLE IF NOT EXISTS bucket(id INTEGER PRIMARY KEY,
-            center BLOB NOT NULL, indices BLOB NOT NULL, embeddings BLOB NOT NULL)";
+            center BLOB NOT NULL, indices BLOB NOT NULL, residuals BLOB NOT NULL)";
         connection.execute(query, ()).unwrap();
         Self { connection }
     }
@@ -446,8 +464,8 @@ impl DB {
         Ok(Query { stmt })
     }
 
-    fn make_bucket_embeddings_query(self: &Self) -> SQLResult<Query> {
-        let stmt = self.connection.prepare("SELECT indices,embeddings FROM bucket WHERE id = ?1")?;
+    fn make_bucket_residuals_query(self: &Self) -> SQLResult<Query> {
+        let stmt = self.connection.prepare("SELECT indices,residuals FROM bucket WHERE id = ?1")?;
         Ok(Query { stmt })
     }
 
@@ -466,8 +484,9 @@ impl DB {
         Ok(())
     }
 
-    fn add_bucket(self: &Self, id: u32, center: &Vec<u8>, indices: &Vec<u8>, embeddings: &Vec<u8>) -> SQLResult<()> {
-        self.connection.execute("INSERT OR REPLACE INTO bucket VALUES(?1, ?2, ?3, ?4)", (id, center, indices, embeddings))?;
+    fn add_bucket(self: &Self, id: u32, center: &Vec<u8>, indices: &Vec<u8>, residuals: &Vec<u8>) -> SQLResult<()> {
+        self.connection.execute("INSERT OR REPLACE INTO bucket VALUES(?1, ?2, ?3, ?4)",
+            (id, center, indices, residuals))?;
         Ok(())
     }
 }
@@ -540,6 +559,51 @@ fn vec_u32_to_u8_vec(data: &Vec<u32>) -> Vec<u8> {
         bytes.extend_from_slice(&val.to_ne_bytes()); // native-endian encoding
     }
     bytes
+}
+
+pub trait TensorBitOps {
+    fn from_4bit_u8(buffer: &[u8], cols: usize, device: &Device) -> Result<Tensor>;
+    fn to_4bit_u8(&self) -> Result<Vec<u8>>;
+}
+
+impl TensorBitOps for Tensor {
+
+    fn from_4bit_u8(bytes: &[u8], cols: usize, device: &Device) -> Result<Tensor> {
+        let mut out = Vec::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            let high = (byte >> 4) & 0x0f;
+            let low = byte & 0x0f;
+            out.push(high as f32);
+            out.push(low as f32);
+        }
+
+        assert!(
+            out.len() % cols == 0,
+            "Unpacked data length ({}) must be divisible by cols ({})",
+            out.len(),
+            cols
+        );
+        let rows = out.len() / cols;
+        Ok(Tensor::from_vec(out, &[rows, cols], device)?)
+    }
+
+    fn to_4bit_u8(&self) -> Result<Vec<u8>> {
+        let data = self.to_vec2::<f32>().unwrap();
+        let flat: Vec<f32> = data.into_iter().flatten().collect();
+
+        assert!(
+            flat.len() % 2 == 0,
+            "Tensor must have an even number of elements to pack"
+        );
+
+        let mut packed = Vec::with_capacity(flat.len() / 2);
+        for chunk in flat.chunks(2) {
+            let high = chunk[0] as u8 & 0x0f;
+            let low = chunk[1] as u8 & 0x0f;
+            packed.push((high << 4) | low);
+        }
+        Ok(packed)
+    }
 }
 
 pub fn u8_to_tensor2d_f32(bytes: &[u8], cols: usize) -> Tensor {
@@ -669,7 +733,7 @@ fn main() -> Result<()> {
 
         let mut center_query = db.make_bucket_center_query().unwrap();
         let mut bucket_sizes_query = db.make_bucket_sizes_query().unwrap();
-        let mut bucket_query = db.make_bucket_embeddings_query().unwrap();
+        let mut bucket_query = db.make_bucket_residuals_query().unwrap();
         let mut body_query = db.make_document_body_query().unwrap();
 
         let mut centers = vec![];
