@@ -133,18 +133,12 @@ fn write_buckets(db: &DB,
         let cluster_data = data.index_select(&data_indices, 0)?;
 
         let residuals = cluster_data.broadcast_sub(&center).unwrap();
-        let qmin = 0.0;
-        let qmax = 15.0;
-        let scale1 = 16.0 / 2.0;
-        let zp = (qmax - qmin) / 2.0;
-        let residuals = ((&residuals * scale1)? + zp)?.round()?.clamp(qmin, qmax)?;
-
         let center_bytes = center.to_f32_bytes()?;
 
         let document_subset = document_indices.index_select(&data_indices, 0)?;
         let indices_bytes = document_subset.to_u32_bytes()?;
 
-        let residuals_bytes = residuals.to_q4_bytes()?;
+        let residuals_bytes = residuals.quantize(4)?.to_q4_bytes()?;
 
         db.add_bucket(i as u32, &center_bytes, &indices_bytes, &residuals_bytes).unwrap();
         bar.inc(1);
@@ -214,12 +208,7 @@ fn match_centroids(
 
         let document_indices = u8_to_vec_u32(&document_indices);
 
-        let residuals = Tensor::from_q4_bytes(&document_embeddings, 128, &device).unwrap();
-        let qmin = 0.0;
-        let qmax = 15.0;
-        let scale2 = 2.0 / 16.0;
-        let zp = (qmax - qmin) / 2.0;
-        let residuals = ((&residuals - zp)? * scale2)?;
+        let residuals = Tensor::from_q4_bytes(&document_embeddings, 128, &device)?.dequantize(4).unwrap();
         let embeddings = residuals.broadcast_add(&center)?;
 
         let (m, _) = residuals.dims2()?;

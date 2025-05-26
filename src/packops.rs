@@ -3,6 +3,8 @@ use candle_core::{Device, Tensor};
 use anyhow::{Result};
 
 pub trait TensorPackOps {
+    fn quantize(&self, bits: u32) -> Result<Tensor>;
+    fn dequantize(&self, bits: u32) -> Result<Tensor>;
     fn from_q4_bytes(buffer: &[u8], cols: usize, device: &Device) -> Result<Tensor>;
     fn from_f32_bytes(bytes: &[u8], cols: usize, device: &Device) -> Result<Tensor>;
     fn to_q4_bytes(&self) -> Result<Vec<u8>>;
@@ -11,6 +13,25 @@ pub trait TensorPackOps {
 }
 
 impl TensorPackOps for Tensor {
+
+    fn quantize(&self, bits: u32) -> Result<Tensor> {
+        let range = 1 << bits;
+        let qmin = 0.0;
+        let qmax = (range - 1) as f64;
+        let scale1 = (range as f64) / 2.0;
+        let zp = (qmax - qmin) / 2.0;
+        Ok(((self * scale1)? + zp)?.round()?.clamp(qmin, qmax)?)
+    }
+
+    fn dequantize(&self, bits: u32) -> Result<Tensor> {
+        let range = 1 << bits;
+        let qmin = 0.0;
+        let qmax = (range - 1) as f64;
+        let scale2 = 2.0 / (range as f64);
+        let zp = (qmax - qmin) / 2.0;
+        Ok(((self - zp)? * scale2)?)
+    }
+
     fn from_q4_bytes(bytes: &[u8], cols: usize, device: &Device) -> Result<Tensor> {
         let mut out = Vec::with_capacity(bytes.len() * 2);
         for &byte in bytes {
