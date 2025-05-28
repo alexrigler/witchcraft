@@ -24,14 +24,12 @@ use tokenizers::Tokenizer;
 const DTYPE: DType = DType::F32;
 
 struct T5ModelBuilder {
-    device: Device,
     config: t5::Config,
     weights_filename: Vec<PathBuf>,
 }
 
 impl T5ModelBuilder {
     pub fn load() -> Result<(Self, Tokenizer)> {
-        let device = Device::new_metal(0)?;
         let path = PathBuf::from(r"xtr.safetensors");
         let weights_filename = vec![path];
         let config = std::fs::read_to_string("xtr-base-en/config.json").unwrap();
@@ -39,7 +37,6 @@ impl T5ModelBuilder {
         let tokenizer = Tokenizer::from_file("xtr-base-en/tokenizer.json").map_err(E::msg).unwrap();
         Ok((
             Self {
-                device,
                 config,
                 weights_filename,
             },
@@ -47,9 +44,9 @@ impl T5ModelBuilder {
         ))
     }
 
-    pub fn build_encoder(&self) -> Result<t5::T5EncoderModel> {
+    pub fn build_encoder(&self, device: &Device) -> Result<t5::T5EncoderModel> {
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&self.weights_filename, DTYPE, &self.device)?
+            VarBuilder::from_mmaped_safetensors(&self.weights_filename, DTYPE, device)?
         };
         Ok(t5::T5EncoderModel::load(vb, &self.config)?)
     }
@@ -209,7 +206,8 @@ fn match_centroids(
         let document_indices = u8_to_vec_u32(&document_indices);
 
         let residuals = Tensor::from_q4_bytes(&document_embeddings, 128, &device)?.dequantize(4).unwrap();
-        let embeddings = residuals.broadcast_add(&center)?;
+        //let residuals = Tensor::from_f32_bytes(&document_embeddings, 128, &device).unwrap();
+        let embeddings = residuals.inv_compand()?.broadcast_add(&center)?;
 
         let (m, _) = residuals.dims2()?;
         for j in 0..m {
@@ -344,9 +342,9 @@ struct Embedder {
 }
 
 impl Embedder {
-    fn new() -> Self {
+    fn new(device: &Device) -> Self {
         let (builder, tokenizer) = T5ModelBuilder::load().unwrap();
-        let model = builder.build_encoder().unwrap();
+        let model = builder.build_encoder(&device).unwrap();
         Self {
             tokenizer,
             model
@@ -565,7 +563,7 @@ fn main() -> Result<()> {
 
     //let device = Device::Cpu;
     let device = Device::new_metal(0)?;
-    let embedder = Embedder::new();
+    let embedder = Embedder::new(&device);
 
     let db = DB::new();
     let mut query = db.make_query().unwrap();
