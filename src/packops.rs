@@ -8,6 +8,7 @@ pub trait TensorPackOps {
     fn quantize(&self, bits: u32) -> Result<Tensor>;
     fn dequantize(&self, bits: u32) -> Result<Tensor>;
     fn from_q4_bytes(buffer: &[u8], cols: usize, device: &Device) -> Result<Tensor>;
+    fn from_companded_q4_bytes(buffer: &[u8], cols: usize, device: &Device) -> Result<Tensor>;
     fn from_f32_bytes(bytes: &[u8], cols: usize, device: &Device) -> Result<Tensor>;
     fn to_q4_bytes(&self) -> Result<Vec<u8>>;
     fn to_f32_bytes(&self) -> Result<Vec<u8>>;
@@ -56,7 +57,7 @@ impl TensorPackOps for Tensor {
     fn dequantize(&self, bits: u32) -> Result<Tensor> {
         let range = 1 << bits;
         let qmax = (range - 1) as f64;
-        let scale2 = 2.0 / ((range - 1) as f64);
+        let scale2 = 2.0 / qmax;
         let zp = qmax / 2.0;
         Ok(((self - zp)? * scale2)?)
     }
@@ -98,8 +99,7 @@ impl TensorPackOps for Tensor {
     }
 
     fn to_q4_bytes(&self) -> Result<Vec<u8>> {
-        let data = self.to_vec2::<f32>()?;
-        let flat: Vec<f32> = data.into_iter().flatten().collect();
+        let flat = self.flatten_all()?.to_vec1::<f32>()?;
         /*
         let mut hist: [u32; 16] = [0; 16];
         for i in &flat {
@@ -141,6 +141,33 @@ impl TensorPackOps for Tensor {
         }
         Ok(bytes)
     }
+
+    fn from_companded_q4_bytes(bytes: &[u8], cols: usize, device: &Device) -> Result<Tensor> {
+        let x = Tensor::arange(0.0f32, 16.0f32, &Device::Cpu)?;
+        let x = x.dequantize(4)?.inv_compand()?;
+        let mut table : [f32; 16] = [0.0; 16];
+        for i in 0..16 {
+            table[i] = x.get(i)?.to_scalar()?;
+        }
+
+        let mut out = Vec::with_capacity(bytes.len() * 2);
+        for &byte in bytes {
+            let high = (byte >> 4) & 0x0f;
+            let low = byte & 0x0f;
+            out.push(table[high as usize]);
+            out.push(table[low as usize]);
+        }
+
+        assert!(
+            out.len() % cols == 0,
+            "Unpacked data length ({}) must be divisible by cols ({})",
+            out.len(),
+            cols
+        );
+        let rows = out.len() / cols;
+        Ok(Tensor::from_vec(out, &[rows, cols], device)?)
+    }
+
 }
 
 
