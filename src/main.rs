@@ -199,7 +199,8 @@ fn match_centroids(
     println!("finding top-{} clusters took {} ms.", topk_clusters.len(), now.elapsed().as_millis());
 
     let now = std::time::Instant::now();
-    let mut heap = MinHeap::new();
+    let mut all = vec![];
+    let mut count = 0;
 
     let mut all_document_embeddings = vec![];
     for i in topk_clusters {
@@ -215,7 +216,8 @@ fn match_centroids(
 
         let (m, _) = residuals.dims2()?;
         for j in 0..m {
-            heap.push((document_indices[j], heap.len()));
+            all.push((document_indices[j], count));
+            count += 1;
         }
     }
     println!("heap fill took {} ms.", now.elapsed().as_millis());
@@ -233,14 +235,18 @@ fn match_centroids(
     println!("sim mmul took {} ms.", now.elapsed().as_millis());
     let now = std::time::Instant::now();
 
+    all.sort();
+    all.push((std::u32::MAX, 0)); // sentinel, triggers push of last element
+
     let mut last = std::u32::MAX;
     let mut current = Tensor::zeros((n,), DType::F32, &Device::Cpu)?;
 
     let mut heap2 = MinHeap::new();
     let mut unique_docs = 0;
-    while let Some((idx, i)) = heap.pop() {
 
-        if last != idx || heap.len() == 0 {
+    for (idx, i) in all {
+
+        if last != idx {
             unique_docs += 1;
             let score = current.mean(0)?.to_scalar::<f32>()?;
             if score >= cutoff {
