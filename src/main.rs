@@ -505,6 +505,11 @@ impl DB {
         Self { connection }
     }
 
+    fn execute(self: &Self, sql: &str) -> SQLResult<()> {
+        self.connection.execute(sql, ()).unwrap();
+        Ok(())
+    }
+
     fn query(self: &Self, sql: &str) -> SQLResult<Query> {
         let stmt = self.connection.prepare(&sql)?;
         Ok(Query { stmt })
@@ -669,6 +674,8 @@ fn main() -> Result<()> {
         }
 
     } else if args.len() == 2 && &args[1] == "index" {
+
+        db.execute("DELETE from bucket").unwrap();
 
         let chunks_count = db.query("SELECT count(hash) FROM chunk")?.point((), |row| {
                 Ok( row.get::<_, f32>(0)?,)
