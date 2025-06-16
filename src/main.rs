@@ -796,36 +796,29 @@ fn main() -> Result<()> {
             }).unwrap();
         println!("chunks_count {}", chunks_count);
 
-        let mut avg_query = db.query("SELECT avg(length(embedding))
-                FROM chunk WHERE rowid IN (SELECT rowid FROM chunk ORDER BY RANDOM() LIMIT 1000)").unwrap();
-        let avg_len = avg_query.point((), |row| {
-                Ok(
-                    row.get::<_, f32>(0)?,
-                )
-            })?;
-        let avg_embeddings = (avg_len / (128.0 * 4.0)).ceil();
-        println!("avg embeddings per chunk {}", avg_embeddings);
-        let est_total_embeddings = chunks_count * avg_embeddings;
-        let subset_size = chunks_count.sqrt().ceil();
-        println!("est_total_embeddings={} samling subset size {}", est_total_embeddings, subset_size);
-
-        let mut kmeans_query1 = db.query("SELECT chunk.embedding FROM chunk WHERE chunk.rowid IN
-                (SELECT chunk.rowid FROM chunk ORDER BY RANDOM() LIMIT ?1)")?;
-
+        let mut kmeans_query1 = db.query("SELECT chunk.embedding FROM chunk")?;
+        let mut total_embeddings = 0;
+        let mut rng = rand::rng();
         let mut all_embeddings = vec![];
         println!("read embeddings...");
-        for embedding in kmeans_query1.iter((subset_size,), |row| {
+        for embedding in kmeans_query1.iter((), |row| {
             Ok( row.get::<_, Vec<u8>>(0)? )
         })? {
             let t = Tensor::from_f32_bytes(&embedding?, 128, &Device::Cpu)?;
-            let split = split_tensor(&t);
-            all_embeddings.extend(split);
+            let (m, _) = t.dims2()?;
+            let k = ((m as f32).sqrt().ceil()) as usize;
+            let subset_idx = rand::seq::index::sample(&mut rng, m, k).into_vec();
+            for i in subset_idx {
+                let row = t.get(i as usize)?;
+                all_embeddings.push(row);
+            }
+            total_embeddings += m;
         }
-        let matrix = Tensor::cat(&all_embeddings, 0)?.to_device(&device).unwrap();
+        let matrix = Tensor::stack(&all_embeddings, 0)?.to_device(&device).unwrap();
         let now = std::time::Instant::now();
-        let log2_k = (16.0 * est_total_embeddings.sqrt()).log(2.0).floor() as u32;
+        let log2_k = (16.0 * (total_embeddings as f64).sqrt()).log(2.0).floor() as u32;
         let k = 1 << log2_k;
-        println!("est_total_embeddings={} k={}", est_total_embeddings, k);
+        println!("total_embeddings={} k={}", total_embeddings, k);
         let (centers, idxs) = kmeans(&matrix, k as usize, 5, &device)?;
         println!("kmeans took {} ms.", now.elapsed().as_millis());
         println!("idxs {}", idxs);
