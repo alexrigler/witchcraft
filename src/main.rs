@@ -294,14 +294,12 @@ fn match_centroids(
         center_query: &mut Query,
         bucket_query: &mut Query,
         query_embeddings: &Tensor,
-        report: bool) -> Result<Vec<(f32, u32)>> {
+        cutoff: f32,
+        top_k: usize) -> Result<Vec<(f32, u32)>> {
     let now = std::time::Instant::now();
 
     let k = 32;
     let t_prime = 40000;
-
-    let cutoff = if report { 0.5 } else { 0.0 };
-    let top_k = if report { 10 } else { 100 };
 
     let device = query_embeddings.device();
 
@@ -842,7 +840,7 @@ fn main() -> Result<()> {
 
         println!("Doing semantic search for: {}", q);
         let qe = embedder.embed(q)?.get(0)?;
-        let sem_matches = match_centroids(&mut center_query, &mut bucket_query, &qe, true).unwrap();
+        let sem_matches = match_centroids(&mut center_query, &mut bucket_query, &qe, 0.5, 10).unwrap();
         let sem_idxs: Vec<u32> = sem_matches.iter().map(|&(_, idx)| idx).collect();
         println!("semantic search found {} matches", sem_idxs.len());
 
@@ -894,7 +892,7 @@ fn main() -> Result<()> {
 
             let sem_matches = if use_semantic {
                 let qe = embedder.embed(&question)?.get(0)?;
-                match_centroids(&mut center_query, &mut bucket_query, &qe, false).unwrap()
+                match_centroids(&mut center_query, &mut bucket_query, &qe, 0.0, 100).unwrap()
             } else {
                 [].to_vec()
             };
