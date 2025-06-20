@@ -417,13 +417,40 @@ fn match_centroids(
             count += 1;
         }
     }
-    println!("dense matrix fill took {} ms.", now.elapsed().as_millis());
+    println!("reading indexed embeddings took {} ms.", now.elapsed().as_millis());
+
     let now = std::time::Instant::now();
+    let mut num_unindexed = 0;
+    let mut unindexed_chunks_query = db.query(
+        "SELECT document.rowid,chunk.hash,chunk.embedding FROM document,chunk
+            LEFT JOIN indexed_chunk ON indexed_chunk.generation=?1
+            AND indexed_chunk.hash=chunk.hash
+            WHERE indexed_chunk.hash IS NULL
+            AND chunk.hash=document.hash")?;
+
+    let results = unindexed_chunks_query.iter((max_generation,), |row| {
+            Ok((
+                row.get::<_, u32>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
+        })?;
+    for result in results {
+        let (id, hash, embeddings) = result?;
+        println!("reading unindexed chunk with hash={}", hash);
+        let embeddings = Tensor::from_f32_bytes(&embeddings, 128, &device)?;
+        let (m, _) = embeddings.dims2()?;
+        all_document_embeddings.push(embeddings);
+        for _ in 0..m {
+            all.push((id, count));
+            count += 1;
+        }
+        num_unindexed += m;
+    }
+    println!("reading {} unindexed embeddings took {} ms.", num_unindexed, now.elapsed().as_millis());
 
     let all_document_embeddings = Tensor::cat(&all_document_embeddings, 0).unwrap();
     let all_document_embeddings = all_document_embeddings.to_device(query_embeddings.device())?;
-
-    println!("tensor stacking took {} ms.", now.elapsed().as_millis());
 
     let now = std::time::Instant::now();
     let sim = query_embeddings.matmul(&all_document_embeddings.t()?)?.transpose(0, 1).unwrap();
@@ -795,7 +822,6 @@ fn main() -> Result<()> {
         db.execute("DELETE from bucket").unwrap();
 
         let mut kmeans_query1 = db.query("SELECT chunk.embedding FROM chunk")?;
-        //let mut kmeans_query1 = db.query("SELECT chunk.hash FROM chunk LEFT JOIN indexed_chunk ON indexed_chunk.hash=chunk.hash WHERE indexed_chunk.hash IS NULL")?;
         let mut total_embeddings = 0;
         let mut rng = rand::rng();
         let mut all_embeddings = vec![];
