@@ -429,12 +429,12 @@ fn match_centroids(
 
     let now = std::time::Instant::now();
     let mut num_unindexed = 0;
-    let mut unindexed_chunks_query = db.query(
-        "SELECT document.rowid,chunk.hash,chunk.embeddings FROM document,chunk
-            LEFT JOIN indexed_chunk ON indexed_chunk.generation=?1
-            AND indexed_chunk.hash=chunk.hash
-            WHERE indexed_chunk.hash IS NULL
-            AND chunk.hash=document.hash")?;
+    let mut unindexed_chunks_query = db.query("
+        SELECT d.rowid, c.hash, c.embeddings
+        FROM chunk c
+        JOIN document d ON c.hash = d.hash
+        LEFT JOIN indexed_chunk ic ON ic.generation = ?1 AND ic.hash = c.hash
+        WHERE ic.hash IS NULL")?;
 
     let results = unindexed_chunks_query.iter((max_generation,), |row| {
             Ok((
@@ -683,6 +683,9 @@ impl DB {
             hash TEXT NOT NULL, body TEXT, UNIQUE(filename, hash))";
         connection.execute(query, ()).unwrap();
 
+        let query = "CREATE INDEX IF NOT EXISTS document_index ON document(hash)";
+        connection.execute(query, ()).unwrap();
+
         let query = "CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(body, content='document', content_rowid='rowid')";
         connection.execute(query, ()).unwrap();
 
@@ -693,6 +696,10 @@ impl DB {
 
         let query = "CREATE TABLE IF NOT EXISTS chunk(hash TEXT PRIMARY KEY NOT NULL, embeddings BLOB NOT NULL)";
         connection.execute(query, ()).unwrap();
+
+        let query = "CREATE INDEX IF NOT EXISTS chunk_index ON chunk(hash)";
+        connection.execute(query, ()).unwrap();
+
 
         let query = "CREATE TABLE IF NOT EXISTS bucket(id INTEGER PRIMARY KEY,
             generation INTEGER NOT NULL,
