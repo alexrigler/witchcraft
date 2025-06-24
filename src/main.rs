@@ -24,6 +24,7 @@ use candle_nn::VarBuilder;
 use tokenizers::Tokenizer;
 
 const DTYPE: DType = DType::F32;
+const EMBEDDING_DIM : usize = 128;
 
 struct T5ModelBuilder {
     config: t5::Config,
@@ -116,7 +117,7 @@ fn write_buckets(db: &DB,
     let mut mmuls_total = 0;
     let mut writes_total = 0;
 
-    let embeddings_count = db.query("SELECT sum(length(embeddings)/128) FROM chunk")?.point((), |row| {
+    let embeddings_count = db.query("SELECT sum(length(embeddings)/EMBEDDING_DIM) FROM chunk")?.point((), |row| {
             Ok( row.get::<_, u32>(0)?,)
         }).unwrap();
     assert!(embeddings_count > 0);
@@ -148,7 +149,7 @@ fn write_buckets(db: &DB,
         match results.next() {
             Some(result) => {
                 let (id, hash, embeddings) = result?;
-                let t = Tensor::from_q8_bytes(&embeddings, 128, &Device::Cpu)?
+                let t = Tensor::from_q8_bytes(&embeddings, EMBEDDING_DIM, &Device::Cpu)?
                     .dequantize(8)?
                     .l2_normalize()?;
                 let split = split_tensor(&t);
@@ -347,7 +348,7 @@ fn match_centroids(
         let (id, size, center) = result?;
         cluster_ids.push(id);
         sizes.push(size);
-        let t = Tensor::from_f32_bytes(&center, 128, &Device::Cpu)?.flatten_all()?;
+        let t = Tensor::from_f32_bytes(&center, EMBEDDING_DIM, &Device::Cpu)?.flatten_all()?;
         centers.push(t);
     }
     assert!(centers.len() > 0);
@@ -413,8 +414,8 @@ fn match_centroids(
 
         let document_indices = u8_to_vec_u32(&document_indices);
 
-        //let residuals = Tensor::from_q4_bytes(&document_embeddings, 128, &device)?.dequantize(4)?.inv_compand()?;
-        let residuals = Tensor::from_companded_q4_bytes(&document_embeddings, 128, &device)?;
+        //let residuals = Tensor::from_q4_bytes(&document_embeddings, EMBEDDING_DIM, &device)?.dequantize(4)?.inv_compand()?;
+        let residuals = Tensor::from_companded_q4_bytes(&document_embeddings, EMBEDDING_DIM, &device)?;
         let embeddings = residuals.broadcast_add(&center)?;
         //let embeddings = embeddings.broadcast_div(&embeddings.sqr()?.sum_keepdim(0)?.sqrt()?)?;
         all_document_embeddings.push(embeddings);
@@ -446,7 +447,7 @@ fn match_centroids(
     for result in results {
         let (id, hash, embeddings) = result?;
         println!("reading unindexed chunk with hash={}", hash);
-        let embeddings = Tensor::from_q8_bytes(&embeddings, 128, &Device::Cpu)?
+        let embeddings = Tensor::from_q8_bytes(&embeddings, EMBEDDING_DIM, &Device::Cpu)?
             .dequantize(8)?
             .l2_normalize()?;
         let (m, _) = embeddings.dims2()?;
@@ -526,7 +527,7 @@ fn split_tensor(tensor: &Tensor) -> Vec<Tensor> {
     let dims = tensor.dims();
     let num_rows = dims[0];
 
-    // Collect each row as a separate Tensor of shape [128]
+    // Collect each row as a separate Tensor of shape [EMBEDDING_DIM]
     (0..num_rows)
 
         .map(|i| {
@@ -845,7 +846,7 @@ fn main() -> Result<()> {
         for embeddings in kmeans_query1.iter((), |row| {
             Ok( row.get::<_, Vec<u8>>(0)? )
         })? {
-            let t = Tensor::from_q8_bytes(&embeddings?, 128, &Device::Cpu)?;
+            let t = Tensor::from_q8_bytes(&embeddings?, EMBEDDING_DIM, &Device::Cpu)?;
             let (m, _) = t.dims2()?;
             let k = ((m as f32).sqrt().ceil()) as usize;
             let subset_idx = rand::seq::index::sample(&mut rng, m, k).into_vec();
