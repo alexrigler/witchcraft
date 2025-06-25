@@ -887,9 +887,17 @@ pub fn embed_chunks(db: &DB, device: &Device) -> Result<()> {
 
     let embedding_iter = Gatherer::new(&mut query, &embedder);
     for (hash, embeddings) in embedding_iter {
-        println!("for hash {} {:?}", hash, embeddings.dims2().unwrap());
+        println!("got embedding for chunk with hash {} {:?}", hash, embeddings.dims2().unwrap());
+
+        let embeddings = embeddings.to_device(&Device::Cpu)?;
+
+        let now = std::time::Instant::now();
         let bytes = embeddings.stretch_rows()?.quantize(8)?.to_q8_bytes()?;
+        println!("quantization took {} ms.", now.elapsed().as_millis());
+
+        let now = std::time::Instant::now();
         db.add_chunk(&hash, &bytes).unwrap();
+        println!("database insert took {} ms.", now.elapsed().as_millis());
     }
     Ok(())
 }
