@@ -19,6 +19,10 @@ fn main() -> Result<()> {
 
         Ok( warp::read_csv(&db, &args[2]) )
 
+    } else if args.len() == 3 && args[1] == "add" {
+
+        Ok( warp::add_doc_from_file(&db, &args[2]) )
+
     } else if args.len() == 2 && &args[1] == "embed" {
 
         Ok( warp::embed_chunks(&db, &device) )

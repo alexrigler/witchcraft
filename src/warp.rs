@@ -624,6 +624,15 @@ pub fn read_csv(db: &DB, csvname: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn add_doc_from_file(db: &DB, filename: &str) -> Result<()> {
+    let body = fs::read_to_string(filename)?;
+    let mut hasher = Sha256::new();
+    hasher.update(&body);
+    let hash = format!("{:x}", hasher.finalize());
+    db.add_doc(&filename, &hash, &body).unwrap();
+    Ok(())
+}
+
 pub struct Embedder {
     tokenizer: Tokenizer,
     model: t5::T5EncoderModel,
