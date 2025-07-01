@@ -630,6 +630,16 @@ pub fn add_doc_from_file(db: &DB, filename: &str) -> Result<()> {
     hasher.update(&body);
     let hash = format!("{:x}", hasher.finalize());
     db.add_doc(&filename, &hash, &body).unwrap();
+    println!("added with hash {}", hash);
+    Ok(())
+}
+
+pub fn add_doc_from_string(db: &DB, metadata: &str, body: &str) -> Result<()> {
+    let mut hasher = Sha256::new();
+    hasher.update(&body);
+    let hash = format!("{:x}", hasher.finalize());
+    db.add_doc(metadata, &hash, &body).unwrap();
+    println!("added with hash {}", hash);
     Ok(())
 }
 
@@ -887,7 +897,11 @@ pub fn embed_chunks(db: &DB, device: &Device) -> Result<()> {
 
     let embedding_iter = Gatherer::new(&mut query, &embedder);
     for (hash, embeddings) in embedding_iter {
-        println!("got embedding for chunk with hash {} {:?}", hash, embeddings.dims2().unwrap());
+        println!(
+            "got embedding for chunk with hash {} {:?}",
+            hash,
+            embeddings.dims2().unwrap()
+        );
 
         let embeddings = embeddings.to_device(&Device::Cpu)?;
 
@@ -900,6 +914,23 @@ pub fn embed_chunks(db: &DB, device: &Device) -> Result<()> {
         println!("database insert took {} ms.", now.elapsed().as_millis());
     }
     Ok(())
+}
+
+pub fn count_unindexed_chunks(db: &DB) -> Result<usize> {
+    let mut unindexed_chunks_query = db.query(
+        "
+        SELECT IFNULL(SUM(LENGTH(c.embeddings)/128), 0)
+        FROM chunk c
+        JOIN document d ON c.hash = d.hash
+        LEFT JOIN indexed_chunk ic ON ic.generation =
+            (SELECT MAX(generation) FROM indexed_chunk) AND ic.hash = c.hash
+        WHERE ic.hash IS NULL",
+    )?;
+
+    let count = unindexed_chunks_query.point((), |row| {
+        Ok( row.get::<_, usize>(0)? )
+    })?;
+    Ok(count)
 }
 
 pub fn index_chunks(db: &DB, device: &Device) -> Result<()> {
