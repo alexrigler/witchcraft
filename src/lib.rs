@@ -1,6 +1,4 @@
-use anyhow::Result;
 use candle_core::Device;
-use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
 use std::{
@@ -78,8 +76,8 @@ impl Warp {
         }
     }
     #[napi]
-    pub fn search(&self, q: String) -> Vec<(String, String)> {
-        warp::search(&self.db, &self.embedder, &q, true).unwrap()
+    pub fn search(&self, q: String, threshold: f64) -> Vec<(String, String)> {
+        warp::search(&self.db, &self.embedder, &q, threshold as f32, true).unwrap()
     }
 
     #[napi]

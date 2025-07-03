@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use csv;
 use indicatif::ProgressBar;
 use min_heap::MinHeap;
@@ -966,6 +968,7 @@ pub fn search(
     db: &DB,
     embedder: &Embedder,
     q: &String,
+    threshold: f32,
     use_fulltext: bool,
 ) -> Result<Vec<(String, String)>> {
     let fts_idxs = if use_fulltext {
@@ -977,7 +980,7 @@ pub fn search(
 
     println!("Doing semantic search for: {}", q);
     let qe = embedder.embed(q)?.get(0)?;
-    let sem_matches = match_centroids(&db, &qe, 0.75, 10).unwrap();
+    let sem_matches = match_centroids(&db, &qe, threshold, 10).unwrap();
     let sem_idxs: Vec<u32> = sem_matches.iter().map(|&(_, idx)| idx).collect();
     println!("semantic search found {} matches", sem_idxs.len());
 

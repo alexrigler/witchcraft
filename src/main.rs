@@ -35,7 +35,7 @@ fn main() -> Result<()> {
 
         let q = &args[2..].join(" ");
         let use_fulltext = args[1] == "hybrid";
-        let results = warp::search(&db, &embedder, &q, use_fulltext).unwrap();
+        let results = warp::search(&db, &embedder, &q, 0.75, use_fulltext).unwrap();
         for (filename, body) in results {
             println!("{} : {}", filename, body);
         }
