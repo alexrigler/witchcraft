@@ -1,10 +1,11 @@
-use candle_core::Device;
 use napi_derive::napi;
 
 use std::{
-    sync::{mpsc, LazyLock},
+    sync::{mpsc, OnceLock},
     thread::{self, JoinHandle},
 };
+
+type Job = (String, String, String);
 
 #[derive(Debug)]
 pub struct Indexer {
@@ -13,19 +14,14 @@ pub struct Indexer {
     _handle: JoinHandle<()>,
 }
 
-static INDEXER: LazyLock<Indexer> = LazyLock::new(|| {
-    Indexer::new()
-});
-
-type Job = (String, String, String);
+static INDEXER: OnceLock<Indexer> = OnceLock::new();
 
 impl Indexer {
-    pub fn new() -> Self {
+    pub fn new(db_name: String) -> Self {
         let (tx, rx) = mpsc::channel::<Job>();
-        let db_name = "mydb.sqlite";
-        let db = warp::DB::new(db_name);
+        let db = warp::DB::new(&db_name);
         let handle = thread::spawn(move || {
-            let device = Device::new_metal(0).unwrap();
+            let device = warp::make_device();
             while let Ok(job) = rx.recv() {
                 let (command, arg1, arg2) = job;
                 if command == "add" {
@@ -47,8 +43,12 @@ impl Indexer {
             _handle: handle,
         }
     }
-    pub fn submit(&self, job: Job) {
-        let _ = self.tx.send(job);
+    pub fn init_global(db_name: String) -> &'static Self {
+        INDEXER.get_or_init(|| Indexer::new(db_name))
+    }
+
+    pub fn global() -> &'static Self {
+        INDEXER.get().expect("Indexer not initialized. Call `Indexer::init_global()` first.")
     }
 }
 
@@ -63,9 +63,9 @@ pub struct Warp {
 #[napi]
 impl Warp {
     #[napi(constructor)]
-    pub fn new() -> Self {
-        // we depend on INDEXER.db_name to ensure the DB has been created
-        let db = warp::DB::new_reader(&INDEXER.db_name);
+    pub fn new(db_name: String) -> Self {
+        let indexer = Indexer::init_global(db_name);
+        let db = warp::DB::new_reader(&indexer.db_name);
         let device = warp::make_device();
         let embedder = warp::Embedder::new(&device);
 
@@ -87,16 +87,16 @@ impl Warp {
 
     #[napi]
     pub fn add(&self, metadata: String, body: String) {
-        INDEXER.submit(("add".to_string(), metadata, body));
+        Indexer::global().tx.send(("add".to_string(), metadata, body)).unwrap();
     }
 
     #[napi]
     pub fn embed(&self) {
-        INDEXER.submit(("embed".to_string(), "".to_string(), "".to_string()));
+        Indexer::global().tx.send(("embed".to_string(), "".to_string(), "".to_string())).unwrap();
     }
 
     #[napi]
     pub fn index(&self) {
-        INDEXER.submit(("index".to_string(), "".to_string(), "".to_string()));
+        Indexer::global().tx.send(("index".to_string(), "".to_string(), "".to_string())).unwrap();
     }
 }
