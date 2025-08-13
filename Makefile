@@ -1,11 +1,17 @@
-download:
+
+xtr-base-en/model.safetensors:
+	python downloadxtr.py
+
+assets/config.json.zst assets/tokenizer.json.zst assets/xtr.safetensors.zst: xtr-base-en/model.safetensors
 	python downloadweights.py
 
-build:
+download: assets/config.json.zst assets/tokenizer.json.zst assets/xtr.safetensors.zst
+
+build: download
 	cargo build --release --features accelerate
 	ln -vf target/release/libwarp.dylib target/release/warp.node
 
-buildemb:
+buildemb: download
 	cargo build --release --features accelerate,embed-assets
 	ln -vf target/release/libwarp.dylib target/release/warp.node
 
