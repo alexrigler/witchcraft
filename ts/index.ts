@@ -8,14 +8,15 @@ const server = new McpServer({
   version: "1.0.0"
 });
 
-function doSearch(q: string): string {
+async function doSearch(q: string): Promise<string> {
     const matches = [];
-    const results = search(q, 0.75, 10, "");
+    const results = await search(q, 0.75, 10, "");
+    console.log("warp results", results);
     for (const result of results) {
       let [_head, body] = result;
       matches.push(body);
     }
-    return matches.join("\n\n");
+    return Promise.resolve(matches.join("\n\n"));
 }
 
 server.registerTool("search",
@@ -25,7 +26,7 @@ server.registerTool("search",
     inputSchema: { q: z.string() }
   },
   async ({ q }) => ({
-    content: [{ type: "text", text: String( doSearch(q) ) }]
+    content: [{ type: "text", text: String( await doSearch(q) ) }]
   })
 );
 

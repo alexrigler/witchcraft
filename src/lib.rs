@@ -1,7 +1,9 @@
 use napi_derive::napi;
+use napi::bindgen_prelude::*;
+use napi::{Env, ScopedTask};
 
 use std::{
-    sync::{mpsc, OnceLock},
+    sync::{mpsc, Arc, Mutex, OnceLock},
     thread::{self, JoinHandle},
 };
 
@@ -10,7 +12,6 @@ type Job = (String, String, String);
 #[derive(Debug)]
 pub struct Indexer {
     tx: mpsc::Sender<Job>,
-    db_name: String,
     _handle: JoinHandle<()>,
 }
 
@@ -39,7 +40,6 @@ impl Indexer {
         });
         Indexer {
             tx,
-            db_name: db_name.to_string(),
             _handle: handle,
         }
     }
@@ -54,38 +54,35 @@ impl Indexer {
 
 mod warp;
 
-#[napi(js_name = "Warp")]
-pub struct Warp {
-    db: warp::DB,
+struct WarpInner {
     embedder: warp::Embedder,
+    db: warp::DB,
     cache: warp::EmbeddingsCache,
 }
 
-#[napi]
-impl Warp {
-    #[napi(constructor)]
+impl WarpInner {
+
     pub fn new(db_name: String) -> Self {
-        let indexer = Indexer::init_global(db_name);
-        let db = warp::DB::new_reader(&indexer.db_name);
+        let _indexer = Indexer::init_global(db_name.clone());
+        let db = warp::DB::new_reader(&db_name.clone());
         let device = warp::make_device();
         let embedder = warp::Embedder::new(&device);
         let cache = warp::EmbeddingsCache::new(16);
 
         Self {
-            db: db,
             embedder: embedder,
+            db: db,
             cache: cache,
         }
     }
-    #[napi]
-    pub fn search(&mut self, q: String, threshold: f64, top_k: u32, sql_filter: String) -> Vec<(String, String)> {
 
+    pub fn search(&mut self, q: &String, threshold: f32, top_k: usize, sql_filter: &String) -> Vec<(String, String)> {
         let filter = if !sql_filter.is_empty() {
             Some(sql_filter.as_str())
         } else {
             None
         };
-        match warp::search(&self.db, &self.embedder, &mut self.cache, &q, threshold as f32, top_k as usize, true, filter) {
+        match warp::search(&self.db, &self.embedder, &mut self.cache, &q, threshold, top_k, true, filter) {
             Ok(v) => v,
             Err(e) => {
                 println!("error {} querying for {}", e, &q);
@@ -94,9 +91,113 @@ impl Warp {
         }
     }
 
+    pub fn score(&mut self, q: &String, sentences: &Vec<String>) -> Vec<f32> {
+        if sentences.len() != 0 {
+            match warp::score_query_sentences(&self.embedder, &mut self.cache, &q, &sentences) {
+                Ok(v) => v,
+                Err(e) => {
+                    println!("error {} scoring", e);
+                    [].to_vec()
+                }
+            }
+        } else {
+            [].to_vec()
+        }
+    }
+}
+
+static INNER: OnceLock<Arc<Mutex<WarpInner>>> = OnceLock::new();
+fn inner(db_name: String) -> Arc<Mutex<WarpInner>> {
+    INNER.get_or_init(|| Arc::new(Mutex::new(WarpInner::new(db_name)))).clone()
+}
+
+pub struct SearchTask {
+    inner: Arc<Mutex<WarpInner>>,
+    q: String,
+    threshold: f32,
+    top_k: usize,
+    sql_filter: String,
+}
+
+impl<'env> ScopedTask<'env> for SearchTask {
+    type Output = Vec<(String, String)>;
+    type JsValue = Object<'env>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(self.inner.lock().unwrap().search(&self.q, self.threshold, self.top_k, &self.sql_filter))
+    }
+
+    fn resolve(&mut self, env: &'env Env, output: Self::Output) -> Result<Self::JsValue> {
+        let mut rows: Vec<Array<'env>> = Vec::with_capacity(output.len());
+        for (k, v) in output {
+            // Each pair becomes an Array<string, string>
+            let pair = Array::from_vec(env, vec![k, v])?; // Strings implement ToNapiValue
+            rows.push(pair);
+        }
+        // Turn Vec<Array> into a JS Array
+        let arr = Array::from_vec(env, rows)?;
+        // If you need to return Object<'env>, coerce the Array to Object
+        arr.coerce_to_object()
+    }
+}
+
+pub struct ScoreTask {
+    inner: Arc<Mutex<WarpInner>>,
+    q: String,
+    sentences: Vec<String>,
+}
+
+impl<'env> ScopedTask<'env> for ScoreTask {
+    type Output = Vec<f32>;
+    type JsValue = Object<'env>;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        Ok(self.inner.lock().unwrap().score(&self.q, &self.sentences))
+    }
+
+    fn resolve(&mut self, env: &'env Env, output: Self::Output) -> Result<Self::JsValue> {
+        let mut rows: Vec<f32> = Vec::with_capacity(output.len());
+        for score in output {
+            rows.push(score);
+        }
+        let arr = Array::from_vec(env, rows)?;
+        // If you need to return Object<'env>, coerce the Array to Object
+        arr.coerce_to_object()
+    }
+}
+
+#[napi(js_name = "Warp")]
+pub struct Warp {
+    db_name: String,
+}
+
+#[napi]
+impl Warp {
+    #[napi(constructor)]
+    pub fn new(db_name: String) -> Self {
+        let _indexer = Indexer::init_global(db_name.clone());
+        Self {
+            db_name: db_name,
+        }
+    }
     #[napi]
-    pub fn score(&mut self, q: String, sentences: Vec<String>) -> Vec<f32> {
-        warp::score_query_sentences(&self.embedder, &mut self.cache, &q, &sentences).unwrap()
+    pub fn search(&mut self, q: String, threshold: f64, top_k: u32, sql_filter: String) -> AsyncTask<SearchTask> {
+        AsyncTask::new(SearchTask {
+            inner: inner(self.db_name.clone()),
+            q: q,
+            threshold: threshold as f32,
+            top_k: top_k as usize,
+            sql_filter: sql_filter,
+        })
+    }
+
+    #[napi]
+    pub fn score(&mut self, q: String, sentences: Vec<String>) -> AsyncTask<ScoreTask> {
+        AsyncTask::new(ScoreTask {
+            inner: inner(self.db_name.clone()),
+            q: q,
+            sentences: sentences,
+        })
     }
 
     #[napi]

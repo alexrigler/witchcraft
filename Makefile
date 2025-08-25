@@ -18,6 +18,6 @@ buildemb: download
 run: build
 	node index.js
 
-mcp:
+mcp: build
 	yarn build
-	cmcp "yarn start" tools/call name=search 'arguments:={"q": "is there a connection between milk intake and pimples in young people?" }'
+	cmcp "yarn start" tools/call name=search 'arguments:={"q": "Drew Houston hack week project" }'
