@@ -1124,6 +1124,7 @@ pub fn score_query_sentences(
     sentences: &[String],
 ) -> Result<Vec<f32>> {
 
+    let now = std::time::Instant::now();
     let qe = match cache.get(&q) {
         Some(existing) => {
             existing
@@ -1134,7 +1135,6 @@ pub fn score_query_sentences(
             qe
         }
     };
-    let (m, _n) = qe.dims2()?;
     let mut sizes = vec![];
     let mut ses = vec![];
     for s in sentences.iter() {
@@ -1150,14 +1150,19 @@ pub fn score_query_sentences(
     let mut scores = vec![];
     let mut i = 0;
     for sz in sizes.iter() {
-        let mut max = Tensor::zeros((m,), DType::F32, &Device::Cpu)?;
-        for _ in 0usize..*sz {
-            let row = sim.get(i)?;
+        let sz = *sz;
+        let mut max = sim.get(i)?;
+        for j in 1usize..sz {
+            let row = sim.get(i + j)?;
             max = max.maximum(&row)?;
-            i += 1;
         }
         scores.push(max.mean(0)?.to_scalar::<f32>()?);
+        i += sz;
     }
+    for i in 0usize..sentences.len() {
+        println!("warp sentence score {} {}", sentences[i], scores[i]);
+    }
+    println!("scoring {} sentences took {} ms.", sentences.len(), now.elapsed().as_millis());
     Ok(scores)
 }
 
