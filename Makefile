@@ -2,10 +2,16 @@
 xtr-base-en/model.safetensors:
 	python downloadxtr.py
 
-assets/config.json.zst assets/tokenizer.json.zst assets/xtr.safetensors.zst: xtr-base-en/model.safetensors
+assets/config.json.zst assets/tokenizer.json.zst xtr.safetensors assets/xtr.safetensors.zst: xtr-base-en/model.safetensors
 	python downloadweights.py
 
-download: assets/config.json.zst assets/tokenizer.json.zst assets/xtr.safetensors.zst
+xtr.gguf: xtr.safetensors
+	cargo run --release --bin quantize-tool xtr.safetensors xtr.gguf
+
+assets/xtr.gguf.zst: xtr.gguf
+	zstd -19 -f xtr.gguf -o assets/xtr.gguf.zst
+
+download: assets/config.json.zst assets/tokenizer.json.zst assets/xtr.safetensors.zst assets/xtr.gguf.zst
 
 build: download
 	cargo build --release --features accelerate
@@ -21,6 +27,6 @@ win: download
 run: build
 	node index.js
 
-mcp: build
+mcp: buildemb
 	yarn build
 	cmcp "yarn start" tools/call name=search 'arguments:={"q": "Drew Houston hack week project" }'

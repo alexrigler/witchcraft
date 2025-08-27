@@ -7,6 +7,10 @@ edition = "2024"
 name = "warp-cli"
 path = "src/main.rs"
 
+[[bin]]
+name = "quantize-tool"
+path = "src/quantize-tool.rs"
+
 [lib]
 crate-type = ["cdylib"]
 path = "src/lib.rs"
