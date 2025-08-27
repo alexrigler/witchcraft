@@ -370,6 +370,31 @@ fn get_centers(db: &DB, device: &Device, version: u64) -> Result<(Vec<u32>, Vec<
     Ok((cluster_ids, sizes, centers, tensor))
 }
 
+
+#[inline(always)]
+fn vmax_inplace(current: &mut [f32], row: &[f32]) {
+    debug_assert_eq!(current.len(), row.len());
+    // Process 8 at a time (helps LLVM emit SIMD), then handle the tail.
+    let (c8, c_tail) = current.as_chunks_mut::<8>();
+    let (r8, r_tail) = row.as_chunks::<8>();
+
+    for (c, r) in c8.iter_mut().zip(r8.iter()) {
+        // Unrolled 8-lane max; safe, no bounds checks in the loop body.
+        c[0] = c[0].max(r[0]);
+        c[1] = c[1].max(r[1]);
+        c[2] = c[2].max(r[2]);
+        c[3] = c[3].max(r[3]);
+        c[4] = c[4].max(r[4]);
+        c[5] = c[5].max(r[5]);
+        c[6] = c[6].max(r[6]);
+        c[7] = c[7].max(r[7]);
+    }
+
+    for (c, &r) in c_tail.iter_mut().zip(r_tail.iter()) {
+        *c = c.max(r);
+    }
+}
+
 fn match_centroids(
     db: &DB,
     query_embeddings: &Tensor,
@@ -385,8 +410,7 @@ fn match_centroids(
     let k = 32;
     let t_prime = 40000;
     let device = query_embeddings.device();
-    let (m, n) = query_embeddings.dims2()?;
-
+    let (m, _n) = query_embeddings.dims2()?;
 
     let mut all_document_embeddings = vec![];
     let mut all = vec![];
@@ -555,6 +579,18 @@ fn match_centroids(
         .unwrap();
     let sim = sim.to_device(&Device::Cpu)?;
 
+    let sim = sim.to_dtype(DType::F32)?.contiguous()?;
+    let (_, n) = sim.dims2()?;
+    let sim: Vec<f32> = sim.flatten_all()?.to_vec1::<f32>()?;
+    let row_at = |pos: usize| -> &[f32] {
+        let start = pos * n;
+        &sim[start .. start + n]
+    };
+
+    let missing_similarities = missing_similarities
+        .contiguous()?
+        .to_vec1::<f32>()?;
+
     println!("sim mmul took {} ms.", now.elapsed().as_millis());
 
     let now = std::time::Instant::now();
@@ -562,10 +598,10 @@ fn match_centroids(
     println!("sorting {} rows took {}ms", all.len(), now.elapsed().as_millis());
 
     let now = std::time::Instant::now();
-    let mut current = Tensor::zeros((n,), DType::F32, &Device::Cpu)?;
+    let mut current = vec![0.0f32; n];
 
     let mut unique_docs = 0;
-    let mut prev_idx = 0;
+    let mut prev_idx = u32::MAX;
     let mut all_scored = vec![];
 
     for i in 0.. {
@@ -573,7 +609,8 @@ fn match_centroids(
         let (idx, pos) = all[i];
         if i > 0 && (prev_idx != idx || is_last) {
             unique_docs += 1;
-            let score = current.mean(0)?.to_scalar::<f32>().unwrap();
+            let sum: f32 = current.iter().copied().sum();
+            let score = sum / (n as f32);
             if score > cutoff {
                 all_scored.push((prev_idx, score));
             }
@@ -583,12 +620,11 @@ fn match_centroids(
             break;
         }
 
-        let row = sim.get(pos)?;
-        current = if idx == prev_idx {
-            row.maximum(&current)?
-        } else {
-            row.maximum(&missing_similarities)?
-        };
+        let row = row_at(pos);
+        if prev_idx != idx {
+            current.copy_from_slice(&missing_similarities);
+        }
+        vmax_inplace(&mut current, row);
 
         prev_idx = idx;
     }
