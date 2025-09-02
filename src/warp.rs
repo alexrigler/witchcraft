@@ -2,6 +2,7 @@
 
 use csv;
 use indicatif::ProgressBar;
+use once_cell::sync::Lazy;
 use rusqlite::{Connection, OpenFlags, Result as SQLResult, Statement};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -11,7 +12,6 @@ use std::fs;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::mem::size_of;
-use once_cell::sync::Lazy;
 use std::sync::RwLock;
 
 //mod t5;
@@ -116,7 +116,7 @@ fn write_buckets(db: &DB, centers: &Tensor, device: &Device) -> Result<()> {
 
     let mut query = db.query(
         "SELECT document.rowid,chunk.rowid,chunk.embeddings FROM document,chunk
-        WHERE document.hash = chunk.hash"
+        WHERE document.hash = chunk.hash",
     );
 
     let mut results = query.query_map((), |row| {
@@ -326,19 +326,27 @@ struct CachedTensor {
 
 static CACHED: Lazy<RwLock<Option<CachedTensor>>> = Lazy::new(|| RwLock::new(None));
 
-fn get_centers(db: &DB, device: &Device, version: u64) -> Result<(Vec<u32>, Vec<usize>, Vec<Tensor>, Tensor)> {
+fn get_centers(
+    db: &DB,
+    device: &Device,
+    version: u64,
+) -> Result<(Vec<u32>, Vec<usize>, Vec<Tensor>, Tensor)> {
     let now = std::time::Instant::now();
     {
         let cache = CACHED.read().unwrap();
         if let Some(cached) = &*cache {
             if cached.version == version {
-                return Ok((cached.cluster_ids.clone(), cached.sizes.clone(), cached.centers.clone(), cached.tensor.clone()));
+                return Ok((
+                    cached.cluster_ids.clone(),
+                    cached.sizes.clone(),
+                    cached.centers.clone(),
+                    cached.tensor.clone(),
+                ));
             }
         }
     }
 
-    let mut center_query =
-        db.query("SELECT id,length(indices)/4,center FROM bucket ORDER BY id");
+    let mut center_query = db.query("SELECT id,length(indices)/4,center FROM bucket ORDER BY id");
     let mut cluster_ids = vec![];
     let mut sizes = vec![];
     let mut centers = vec![];
@@ -375,7 +383,6 @@ fn get_centers(db: &DB, device: &Device, version: u64) -> Result<(Vec<u32>, Vec<
 
     Ok((cluster_ids, sizes, centers, tensor))
 }
-
 
 #[inline(always)]
 fn vmax_inplace(current: &mut [f32], row: &[f32]) {
@@ -423,7 +430,8 @@ fn match_centroids(
     let mut count = 0;
     let mut missing = vec![];
 
-    let (cluster_ids, sizes, centers, centers_matrix) = get_centers(&db, &device, max_generation as u64)?;
+    let (cluster_ids, sizes, centers, centers_matrix) =
+        get_centers(&db, &device, max_generation as u64)?;
 
     if centers.len() > 0 {
         let now = std::time::Instant::now();
@@ -533,10 +541,10 @@ fn match_centroids(
         threshold
     };
 
-
     let now = std::time::Instant::now();
     let mut num_unindexed = 0;
-    let mut unindexed_chunks_query = db.query( "
+    let mut unindexed_chunks_query = db.query(
+        "
         SELECT d.rowid, c.embeddings
         FROM document AS d
         JOIN chunk AS c ON c.hash = d.hash
@@ -545,14 +553,11 @@ fn match_centroids(
           FROM indexed_chunk2 AS i
           WHERE i.chunkid = c.rowid
             AND i.generation = ?1
-        )"
+        )",
     );
 
     let results = unindexed_chunks_query.query_map((max_generation,), |row| {
-        Ok((
-            row.get::<_, u32>(0)?,
-            row.get::<_, Vec<u8>>(1)?,
-        ))
+        Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?))
     })?;
     for result in results {
         let (id, embeddings) = result?;
@@ -592,18 +597,20 @@ fn match_centroids(
     let sim: Vec<f32> = sim.flatten_all()?.to_vec1::<f32>()?;
     let row_at = |pos: usize| -> &[f32] {
         let start = pos * n;
-        &sim[start .. start + n]
+        &sim[start..start + n]
     };
 
-    let missing_similarities = missing_similarities
-        .contiguous()?
-        .to_vec1::<f32>()?;
+    let missing_similarities = missing_similarities.contiguous()?.to_vec1::<f32>()?;
 
     println!("sim mmul took {} ms.", now.elapsed().as_millis());
 
     let now = std::time::Instant::now();
     all.sort_unstable();
-    println!("sorting {} rows took {}ms", all.len(), now.elapsed().as_millis());
+    println!(
+        "sorting {} rows took {}ms",
+        all.len(),
+        now.elapsed().as_millis()
+    );
 
     let now = std::time::Instant::now();
     let mut current = vec![0.0f32; n];
@@ -644,7 +651,8 @@ fn match_centroids(
     );
 
     let now = std::time::Instant::now();
-    db.execute("CREATE TEMPORARY TABLE temp2(rowid INTEGER PRIMARY KEY, score FLOAT)").unwrap();
+    db.execute("CREATE TEMPORARY TABLE temp2(rowid INTEGER PRIMARY KEY, score FLOAT)")
+        .unwrap();
     let mut insert_temp_query = db.query("INSERT INTO temp2 VALUES(?1, ?2)");
 
     for (idx, score) in all_scored.iter() {
@@ -714,9 +722,7 @@ pub fn read_csv(db: &DB, csvname: &str) -> Result<()> {
 
     for result in rdr.deserialize() {
         let record: Record = result?;
-        let metadata = CorpusMetaData {
-            key: record.name
-        };
+        let metadata = CorpusMetaData { key: record.name };
         let metadata = serde_json::to_string(&metadata)?;
         let body = record.body;
 
@@ -785,12 +791,11 @@ pub struct Gatherer<'a> {
 impl<'a> Gatherer<'a> {
     fn new(stmt: &'a mut Statement, embedder: &'a Embedder) -> Self {
         let documents = Box::new(
-            stmt
-                .query_map((), |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .unwrap()
-                .map(Result::unwrap),
+            stmt.query_map((), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .map(Result::unwrap),
         );
 
         Self {
@@ -807,13 +812,21 @@ impl<'a> Iterator for Gatherer<'a> {
         let mut doc_embedding = vec![];
         match self.documents.next() {
             Some((hash, body)) => {
-
                 let now = std::time::Instant::now();
-                let embeddings = self.embedder.embed(&body).unwrap().to_device(&Device::Cpu).unwrap();
+                let embeddings = self
+                    .embedder
+                    .embed(&body)
+                    .unwrap()
+                    .to_device(&Device::Cpu)
+                    .unwrap();
 
                 let (_b, m, _n) = embeddings.dims3().unwrap();
                 let dt = now.elapsed().as_secs_f64();
-                println!("embedder took {} ms ({} rows/s).", now.elapsed().as_millis(), ((m as f64) / dt).round());
+                println!(
+                    "embedder took {} ms ({} rows/s).",
+                    now.elapsed().as_millis(),
+                    ((m as f64) / dt).round()
+                );
 
                 let split = split_tensor(&embeddings.get(0).ok()?);
                 doc_embedding.extend(split);
@@ -839,9 +852,11 @@ impl DB {
         let connection = Connection::open(db_fn).unwrap();
 
         //connection
-            //.pragma_update(None, "journal_mode", &"WAL")
-            //.unwrap();
-        connection.busy_timeout(std::time::Duration::from_secs(5)).unwrap();
+        //.pragma_update(None, "journal_mode", &"WAL")
+        //.unwrap();
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
 
         let query = "CREATE TABLE IF NOT EXISTS document(metadata JSON,
             hash TEXT NOT NULL, body TEXT, UNIQUE(metadata, hash))";
@@ -969,15 +984,14 @@ fn normalize_l2(v: &Tensor) -> Result<Tensor> {
 pub fn embed_chunks(db: &DB, device: &Device) -> Result<()> {
     let embedder = Embedder::new(&device);
 
-    let mut query = db
-        .query(
-            "SELECT
+    let mut query = db.query(
+        "SELECT
         document.hash,document.body
         FROM document
         LEFT JOIN chunk ON document.hash = chunk.hash
         WHERE chunk.hash IS NULL
         ORDER BY document.hash",
-        );
+    );
 
     let embedding_iter = Gatherer::new(&mut query, &embedder);
     for (hash, embeddings) in embedding_iter {
@@ -1005,16 +1019,14 @@ pub fn count_unindexed_chunks(db: &DB) -> Result<usize> {
         LEFT JOIN indexed_chunk2 AS i
         ON i.chunkid = c.rowid
         AND i.generation = (SELECT MAX(generation) FROM indexed_chunk2)
-        WHERE i.chunkid IS NULL"));
+        WHERE i.chunkid IS NULL"
+    ));
 
-    let count = unindexed_chunks_query.query_row((), |row| {
-        Ok( row.get::<_, usize>(0)? )
-    })?;
+    let count = unindexed_chunks_query.query_row((), |row| Ok(row.get::<_, usize>(0)?))?;
     Ok(count)
 }
 
 pub fn index_chunks(db: &DB, device: &Device) -> Result<()> {
-
     let unindexed = count_unindexed_chunks(&db)?;
     if unindexed == 0 {
         println!("all chunks indexed already!");
@@ -1072,7 +1084,9 @@ pub struct EmbeddingsCache {
 impl EmbeddingsCache {
     pub fn new(capacity: usize) -> Self {
         let cap = NonZeroUsize::new(capacity.max(1)).unwrap();
-        Self { cache: LruCache::new(cap) }
+        Self {
+            cache: LruCache::new(cap),
+        }
     }
 
     pub fn get(&mut self, key: &String) -> Option<Tensor> {
@@ -1156,12 +1170,9 @@ pub fn score_query_sentences(
     q: &String,
     sentences: &[String],
 ) -> Result<Vec<f32>> {
-
     let now = std::time::Instant::now();
     let qe = match cache.get(&q) {
-        Some(existing) => {
-            existing
-        }
+        Some(existing) => existing,
         None => {
             let qe = embedder.embed(&q)?.get(0)?;
             cache.put(&q, &qe);
@@ -1195,7 +1206,11 @@ pub fn score_query_sentences(
     for i in 0usize..sentences.len() {
         println!("warp sentence score {} {}", sentences[i], scores[i]);
     }
-    println!("scoring {} sentences took {} ms.", sentences.len(), now.elapsed().as_millis());
+    println!(
+        "scoring {} sentences took {} ms.",
+        sentences.len(),
+        now.elapsed().as_millis()
+    );
     Ok(scores)
 }
 

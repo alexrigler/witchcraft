@@ -1,6 +1,6 @@
-use napi_derive::napi;
 use napi::bindgen_prelude::*;
 use napi::{Env, ScopedTask};
+use napi_derive::napi;
 
 use std::{
     sync::{mpsc, Arc, Mutex, OnceLock},
@@ -48,7 +48,9 @@ impl Indexer {
     }
 
     pub fn global() -> &'static Self {
-        INDEXER.get().expect("Indexer not initialized. Call `Indexer::init_global()` first.")
+        INDEXER
+            .get()
+            .expect("Indexer not initialized. Call `Indexer::init_global()` first.")
     }
 }
 
@@ -61,7 +63,6 @@ struct WarpInner {
 }
 
 impl WarpInner {
-
     pub fn new(db_name: String) -> Self {
         let _indexer = Indexer::init_global(db_name.clone());
         let db = warp::DB::new_reader(&db_name.clone());
@@ -76,13 +77,28 @@ impl WarpInner {
         }
     }
 
-    pub fn search(&mut self, q: &String, threshold: f32, top_k: usize, sql_filter: &String) -> Vec<(f32, String, String)> {
+    pub fn search(
+        &mut self,
+        q: &String,
+        threshold: f32,
+        top_k: usize,
+        sql_filter: &String,
+    ) -> Vec<(f32, String, String)> {
         let filter = if !sql_filter.is_empty() {
             Some(sql_filter.as_str())
         } else {
             None
         };
-        match warp::search(&self.db, &self.embedder, &mut self.cache, &q, threshold, top_k, true, filter) {
+        match warp::search(
+            &self.db,
+            &self.embedder,
+            &mut self.cache,
+            &q,
+            threshold,
+            top_k,
+            true,
+            filter,
+        ) {
             Ok(v) => v,
             Err(e) => {
                 println!("error {} querying for {}", e, &q);
@@ -108,7 +124,9 @@ impl WarpInner {
 
 static INNER: OnceLock<Arc<Mutex<WarpInner>>> = OnceLock::new();
 fn inner(db_name: String) -> Arc<Mutex<WarpInner>> {
-    INNER.get_or_init(|| Arc::new(Mutex::new(WarpInner::new(db_name)))).clone()
+    INNER
+        .get_or_init(|| Arc::new(Mutex::new(WarpInner::new(db_name))))
+        .clone()
 }
 
 pub struct SearchTask {
@@ -124,7 +142,11 @@ impl<'env> ScopedTask<'env> for SearchTask {
     type JsValue = Object<'env>;
 
     fn compute(&mut self) -> Result<Self::Output> {
-        Ok(self.inner.lock().unwrap().search(&self.q, self.threshold, self.top_k, &self.sql_filter))
+        Ok(self
+            .inner
+            .lock()
+            .unwrap()
+            .search(&self.q, self.threshold, self.top_k, &self.sql_filter))
     }
 
     fn resolve(&mut self, env: &'env Env, out: Self::Output) -> Result<Self::JsValue> {
@@ -134,14 +156,13 @@ impl<'env> ScopedTask<'env> for SearchTask {
             // Triplet [number, string, string]
             let mut triplet: Array<'env> = env.create_array(3)?;
             triplet.set(0, score as f64)?; // numbers as f64
-            triplet.set(1, a)?;            // String -> JS string
+            triplet.set(1, a)?; // String -> JS string
             triplet.set(2, b)?;
             outer.set(i as u32, triplet)?; // set the triplet into the outer array
         }
         // Return Object<'env> (Array is an Object; coerce to Object)
         outer.coerce_to_object()
     }
-
 }
 
 pub struct ScoreTask {
@@ -179,12 +200,16 @@ impl Warp {
     #[napi(constructor)]
     pub fn new(db_name: String) -> Self {
         let _indexer = Indexer::init_global(db_name.clone());
-        Self {
-            db_name: db_name,
-        }
+        Self { db_name: db_name }
     }
     #[napi]
-    pub fn search(&mut self, q: String, threshold: f64, top_k: u32, sql_filter: String) -> AsyncTask<SearchTask> {
+    pub fn search(
+        &mut self,
+        q: String,
+        threshold: f64,
+        top_k: u32,
+        sql_filter: String,
+    ) -> AsyncTask<SearchTask> {
         AsyncTask::new(SearchTask {
             inner: inner(self.db_name.clone()),
             q: q,
@@ -205,16 +230,25 @@ impl Warp {
 
     #[napi]
     pub fn add(&self, metadata: String, body: String) {
-        Indexer::global().tx.send(("add".to_string(), metadata, body)).unwrap();
+        Indexer::global()
+            .tx
+            .send(("add".to_string(), metadata, body))
+            .unwrap();
     }
 
     #[napi]
     pub fn embed(&self) {
-        Indexer::global().tx.send(("embed".to_string(), "".to_string(), "".to_string())).unwrap();
+        Indexer::global()
+            .tx
+            .send(("embed".to_string(), "".to_string(), "".to_string()))
+            .unwrap();
     }
 
     #[napi]
     pub fn index(&self) {
-        Indexer::global().tx.send(("index".to_string(), "".to_string(), "".to_string())).unwrap();
+        Indexer::global()
+            .tx
+            .send(("index".to_string(), "".to_string(), "".to_string()))
+            .unwrap();
     }
 }

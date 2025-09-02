@@ -15,11 +15,11 @@
 //! - 🤗 [Model Card](https://huggingface.co/t5-base)
 //! - 🤗 Original model from [T5](https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py)
 
+use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_nn::Activation;
 use candle_transformers::models::t5::{
     deserialize_feed_forward_proj_activation, ActivationWithOptionalGating,
 };
-use candle_core::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::Activation;
 use candle_transformers::models::with_tracing::QMatMul;
 use candle_transformers::quantized_nn::Embedding;
 use candle_transformers::quantized_var_builder::VarBuilder;
@@ -617,8 +617,10 @@ impl T5ModelBuilder {
     }
 
     pub fn build_encoder(&self, device: &Device) -> Result<T5EncoderModel> {
-        let vb =
-            candle_transformers::quantized_var_builder::VarBuilder::from_gguf_buffer(MODEL.bytes(), &device)?;
+        let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf_buffer(
+            MODEL.bytes(),
+            &device,
+        )?;
         Ok(T5EncoderModel::load(vb, &self.config)?)
     }
 }

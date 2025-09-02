@@ -1,4 +1,3 @@
-
 use once_cell::sync::OnceCell;
 use std::io::Cursor;
 
@@ -24,13 +23,19 @@ impl Asset {
     /// Constructor used when assets are **embedded**.
     #[cfg(feature = "embed-assets")]
     pub const fn new_embedded(compressed: &'static [u8]) -> Self {
-        Self { compressed, decompressed: OnceCell::new() }
+        Self {
+            compressed,
+            decompressed: OnceCell::new(),
+        }
     }
 
     /// Constructor used when assets are kept **on disk**.
     #[cfg(not(feature = "embed-assets"))]
     pub const fn new_file(path: &'static str) -> Self {
-        Self { path, decompressed: OnceCell::new() }
+        Self {
+            path,
+            decompressed: OnceCell::new(),
+        }
     }
 
     /// Return the decompressed bytes; performs work only on the first call.
@@ -41,18 +46,16 @@ impl Asset {
             let compressed: Vec<u8> = self.compressed.to_vec();
 
             #[cfg(not(feature = "embed-assets"))]
-            let compressed: Vec<u8> = std::fs::read(Path::new(self.path))
-                .expect("failed to read compressed asset file");
+            let compressed: Vec<u8> =
+                std::fs::read(Path::new(self.path)).expect("failed to read compressed asset file");
 
             // 2. Decompress the entire buffer.
             let mut cursor = Cursor::new(compressed);
-            zstd::stream::decode_all(&mut cursor)
-                .expect("zstd decompression failed")
+            zstd::stream::decode_all(&mut cursor).expect("zstd decompression failed")
         })
     }
     pub fn as_str(&'static self) -> &'static str {
-        std::str::from_utf8(self.bytes())
-            .expect("asset is not valid UTF-8")
+        std::str::from_utf8(self.bytes()).expect("asset is not valid UTF-8")
     }
 }
 
