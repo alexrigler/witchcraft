@@ -1,19 +1,140 @@
 use anyhow::Result;
 use std::env;
+use serde::{Deserialize, Serialize};
+use std::fs::File;
+use sha2::{Digest, Sha256};
+use std::io::{BufWriter, Write};
+use csv;
 
 mod warp;
+mod histogram;
+
+use warp::DB;
+
+#[derive(Debug, Deserialize)]
+struct Record {
+    name: String,
+    body: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct CorpusMetaData {
+    key: String,
+}
+
+pub fn read_csv(db: &DB, csvname: &str) -> Result<()> {
+    println!("register documents from CSV {}...", csvname);
+
+    let file = File::open(csvname)?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .from_reader(file);
+
+    for result in rdr.deserialize() {
+        let record: Record = result?;
+        let metadata = CorpusMetaData { key: record.name };
+        let metadata = serde_json::to_string(&metadata)?;
+        let body = record.body;
+
+        let mut hasher = Sha256::new();
+        hasher.update(&body);
+        let hash = format!("{:x}", hasher.finalize());
+        db.add_doc(&metadata, &hash, &body).unwrap();
+    }
+
+    Ok(())
+}
+
+pub fn bulk_search(
+    db: &DB,
+    embedder: &warp::Embedder,
+    csvname: &String,
+    outputname: &String,
+    use_fulltext: bool,
+    use_semantic: bool,
+) -> Result<()> {
+    let file = File::open(csvname)?;
+    let mut rdr = csv::ReaderBuilder::new()
+        .delimiter(b'\t')
+        .has_headers(false)
+        .from_reader(file);
+
+    let file = File::create(outputname).unwrap();
+    let mut writer = BufWriter::new(file);
+
+    let mut metadata_query = db.query("SELECT metadata FROM document WHERE rowid = ?1");
+    let mut histogram = histogram::Histogram::new(10000);
+    let mut embedder_histogram = histogram::Histogram::new(10000);
+
+    for result in rdr.deserialize() {
+        let record: (String, String) = result?;
+        let key = record.0;
+        let question = record.1;
+
+        println!("\nSearching for: {}", question);
+        let now = std::time::Instant::now();
+        let fts_idxs = if use_fulltext {
+            warp::fulltext_search(&db, &question, None)?
+        } else {
+            [].to_vec()
+        };
+
+        let sem_matches = if use_semantic {
+            let now = std::time::Instant::now();
+            let qe = embedder.embed(&question)?.get(0)?;
+            qe.device().synchronize().unwrap();
+            let embedder_latency_ms = now.elapsed().as_millis() as u32;
+            embedder_histogram.record(embedder_latency_ms);
+            println!("embedder took {} ms.", now.elapsed().as_millis());
+            warp::match_centroids(&db, &qe, 0.0, 100, None).unwrap()
+        } else {
+            [].to_vec()
+        };
+        let sem_idxs: Vec<u32> = sem_matches.iter().map(|&(_, idx)| idx).collect();
+        if use_semantic {
+            println!("semantic search found {} matches", sem_idxs.len());
+        }
+
+        let fused = if use_fulltext && use_semantic {
+            warp::reciprocal_rank_fusion(&fts_idxs, &sem_idxs, 60.0)
+        } else if use_fulltext {
+            fts_idxs
+        } else {
+            sem_idxs
+        };
+
+        let mut metadatas = vec![];
+        for idx in fused {
+            let metadata = metadata_query.query_row((idx,), |row| Ok(row.get::<_, String>(0)?))?;
+            metadatas.push(metadata);
+        }
+        let total_ms = now.elapsed().as_millis();
+        histogram.record(total_ms.try_into().unwrap());
+        println!("search took {} ms in total", now.elapsed().as_millis());
+
+        write!(writer, "{}\t", key).unwrap();
+        for metadata in &metadatas {
+            let data: CorpusMetaData = serde_json::from_str(metadata)?;
+            write!(writer, "{},", data.key).unwrap();
+        }
+        write!(writer, "\n").unwrap();
+        writer.flush().unwrap();
+    }
+    println!("p95 embedder latency = {} ms", embedder_histogram.p95());
+    println!("p95 total search latency = {} ms", histogram.p95());
+    Ok(())
+}
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
-    let db = warp::DB::new("mydb.sqlite");
+    let db = DB::new("mydb.sqlite");
     let device = warp::make_device();
     let embedder = warp::Embedder::new(&device);
     let mut cache = warp::EmbeddingsCache::new(1);
 
     if args.len() == 3 && args[1] == "readcsv" {
-        warp::read_csv(&db, &args[2]).unwrap();
-    } else if args.len() == 3 && args[1] == "add" {
-        warp::add_doc_from_file(&db, &args[2]).unwrap();
+        read_csv(&db, &args[2]).unwrap();
     } else if args.len() == 2 && &args[1] == "embed" {
         warp::embed_chunks(&db, &device).unwrap();
     } else if args.len() == 2 && &args[1] == "index" {
@@ -33,7 +154,7 @@ fn main() -> Result<()> {
         let use_semantic = args[1] != "fulltextcsv";
         let csvname = &args[2];
         let outputname = &args[3];
-        warp::bulk_search(
+        bulk_search(
             &db,
             &embedder,
             &csvname,

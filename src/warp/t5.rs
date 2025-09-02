@@ -657,12 +657,7 @@ impl T5ModelBuilder {
         let tokenizer = Tokenizer::from_bytes(TOKENIZER.bytes())
             .map_err(anyhow::Error::msg)
             .unwrap();
-        Ok((
-            Self {
-                config,
-            },
-            tokenizer,
-        ))
+        Ok((Self { config }, tokenizer))
     }
 
     pub fn build_encoder(&self, device: &Device) -> Result<T5EncoderModel> {

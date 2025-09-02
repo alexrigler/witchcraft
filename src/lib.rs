@@ -1,3 +1,5 @@
+/* Node module API for Warp */
+
 use napi::bindgen_prelude::*;
 use napi::{Env, ScopedTask};
 use napi_derive::napi;
@@ -26,7 +28,7 @@ impl Indexer {
             while let Ok(job) = rx.recv() {
                 let (command, arg1, arg2) = job;
                 if command == "add" {
-                    warp::add_doc_from_string(&db, &arg1, &arg2).unwrap();
+                    db.add_doc(&arg1, &arg2).unwrap();
                 } else if command == "index" {
                     let count = warp::count_unindexed_chunks(&db).unwrap();
                     println!("warp unindexed count {}", count);

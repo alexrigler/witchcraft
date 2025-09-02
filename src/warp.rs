@@ -1,38 +1,34 @@
 #![allow(dead_code)]
 
-use csv;
 use indicatif::ProgressBar;
 use once_cell::sync::Lazy;
-use rusqlite::{Connection, OpenFlags, Result as SQLResult, Statement};
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use rusqlite::Statement;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::fs;
-use std::fs::File;
-use std::io::{BufWriter, Write};
 use std::mem::size_of;
 use std::sync::RwLock;
 
-//mod t5;
-//use t5 as t5_encoder;
-
 mod quantized_t5;
+mod t5;
+
+//use t5 as t5_encoder;
 use quantized_t5 as t5_encoder;
 
+mod db;
+pub use db::DB;
+
+mod embedder;
+pub use embedder::Embedder;
+
 pub mod assets;
-mod histogram;
 
 mod packops;
 use packops::TensorPackOps;
 
 mod merger;
-//pub mod qtensor;
-//pub mod varbuilder;
 
-use anyhow::{Error as E, Result};
+use anyhow::Result;
 use candle_core::{DType, Device, IndexOp, Tensor, D};
-use tokenizers::Tokenizer;
 
 const EMBEDDING_DIM: usize = 128;
 
@@ -266,7 +262,7 @@ fn write_buckets(db: &DB, centers: &Tensor, device: &Device) -> Result<()> {
     Ok(())
 }
 
-fn fulltext_search(db: &DB, q: &String, sql_filter: Option<&str>) -> Result<Vec<u32>> {
+pub fn fulltext_search(db: &DB, q: &String, sql_filter: Option<&str>) -> Result<Vec<u32>> {
     let mut fts_idxs = vec![];
 
     let sql = format!(
@@ -297,7 +293,7 @@ fn fulltext_search(db: &DB, q: &String, sql_filter: Option<&str>) -> Result<Vec<
     Ok(fts_idxs)
 }
 
-fn reciprocal_rank_fusion(list1: &[u32], list2: &[u32], k: f64) -> Vec<u32> {
+pub fn reciprocal_rank_fusion(list1: &[u32], list2: &[u32], k: f64) -> Vec<u32> {
     let mut scores: HashMap<u32, f64> = HashMap::new();
 
     for (rank, &doc_id) in list1.iter().enumerate() {
@@ -408,7 +404,7 @@ fn vmax_inplace(current: &mut [f32], row: &[f32]) {
     }
 }
 
-fn match_centroids(
+pub fn match_centroids(
     db: &DB,
     query_embeddings: &Tensor,
     threshold: f32,
@@ -700,87 +696,12 @@ fn split_tensor(tensor: &Tensor) -> Vec<Tensor> {
         .collect()
 }
 
-#[derive(Debug, Deserialize)]
-struct Record {
-    name: String,
-    body: String,
-}
-
-#[derive(Serialize, Deserialize)]
-struct CorpusMetaData {
-    key: String,
-}
-
-pub fn read_csv(db: &DB, csvname: &str) -> Result<()> {
-    println!("register documents from CSV {}...", csvname);
-
-    let file = File::open(csvname)?;
-    let mut rdr = csv::ReaderBuilder::new()
-        .delimiter(b'\t')
-        .has_headers(false)
-        .from_reader(file);
-
-    for result in rdr.deserialize() {
-        let record: Record = result?;
-        let metadata = CorpusMetaData { key: record.name };
-        let metadata = serde_json::to_string(&metadata)?;
-        let body = record.body;
-
-        let mut hasher = Sha256::new();
-        hasher.update(&body);
-        let hash = format!("{:x}", hasher.finalize());
-        db.add_doc(&metadata, &hash, &body).unwrap();
-    }
-
-    Ok(())
-}
-
-pub fn add_doc_from_file(db: &DB, filename: &str) -> Result<()> {
-    let body = fs::read_to_string(filename)?;
-    let mut hasher = Sha256::new();
-    hasher.update(&body);
-    let hash = format!("{:x}", hasher.finalize());
-    let metadata = json!({ "filename": filename }).to_string();
-    db.add_doc(&metadata, &hash, &body).unwrap();
-    Ok(())
-}
-
 pub fn add_doc_from_string(db: &DB, metadata: &str, body: &str) -> Result<()> {
     let mut hasher = Sha256::new();
     hasher.update(&body);
     let hash = format!("{:x}", hasher.finalize());
     db.add_doc(metadata, &hash, &body).unwrap();
     Ok(())
-}
-
-pub struct Embedder {
-    tokenizer: Tokenizer,
-    model: t5_encoder::T5EncoderModel,
-}
-
-impl Embedder {
-    pub fn new(device: &Device) -> Self {
-        let (builder, tokenizer) = t5_encoder::T5ModelBuilder::load().unwrap();
-        let model = builder.build_encoder(&device).unwrap();
-        Self { tokenizer, model }
-    }
-    fn embed(self: &Self, text: &str) -> Result<Tensor> {
-        //let now = std::time::Instant::now();
-        let tokens = self
-            .tokenizer
-            .encode(text, true)
-            .map_err(E::msg)
-            .unwrap()
-            .get_ids()
-            .to_vec();
-        let token_ids = Tensor::new(&tokens[..], self.model.device())
-            .unwrap()
-            .unsqueeze(0)
-            .unwrap();
-        let embeddings = self.model.forward(&token_ids).unwrap();
-        //println!("embedder took {} ms.", now.elapsed().as_millis());
-        normalize_l2(&embeddings)
-    }
 }
 
 pub struct Gatherer<'a> {
@@ -837,132 +758,6 @@ impl<'a> Iterator for Gatherer<'a> {
     }
 }
 
-pub struct DB {
-    connection: Connection,
-}
-
-impl DB {
-    pub fn new_reader(db_fn: &str) -> Self {
-        let connection =
-            Connection::open_with_flags(db_fn, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        Self { connection }
-    }
-
-    pub fn new(db_fn: &str) -> Self {
-        let connection = Connection::open(db_fn).unwrap();
-
-        //connection
-        //.pragma_update(None, "journal_mode", &"WAL")
-        //.unwrap();
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .unwrap();
-
-        let query = "CREATE TABLE IF NOT EXISTS document(metadata JSON,
-            hash TEXT NOT NULL, body TEXT, UNIQUE(metadata, hash))";
-        connection.execute(query, ()).unwrap();
-
-        let query = "CREATE INDEX IF NOT EXISTS document_index ON document(hash)";
-        connection.execute(query, ()).unwrap();
-
-        let query = "CREATE VIRTUAL TABLE IF NOT EXISTS document_fts USING fts5(body, content='document', content_rowid='rowid')";
-        connection.execute(query, ()).unwrap();
-
-        let query = "INSERT INTO document_fts(document_fts) VALUES('rebuild')";
-        connection.execute(query, ()).unwrap();
-
-        let query = "CREATE TABLE IF NOT EXISTS chunk(hash TEXT PRIMARY KEY NOT NULL, embeddings BLOB NOT NULL)";
-        connection.execute(query, ()).unwrap();
-
-        let query = "CREATE INDEX IF NOT EXISTS chunk_index ON chunk(hash)";
-        connection.execute(query, ()).unwrap();
-
-        let query = "CREATE TABLE IF NOT EXISTS bucket(id INTEGER PRIMARY KEY,
-            generation INTEGER NOT NULL,
-            center BLOB NOT NULL, indices BLOB NOT NULL, residuals BLOB NOT NULL)";
-        connection.execute(query, ()).unwrap();
-
-        let query = "CREATE INDEX IF NOT EXISTS bucket_index ON bucket(generation, id)";
-        connection.execute(query, ()).unwrap();
-
-        let query = "DROP TABLE IF EXISTS indexed_chunk"; // replaced by indexed_chunk2
-        connection.execute(query, ()).unwrap();
-
-        let query = "CREATE TABLE IF NOT EXISTS indexed_chunk2(chunkid INTEGER PRIMARY KEY NOT NULL, generation INTEGER NOT NULL)";
-        connection.execute(query, ()).unwrap();
-
-        let query =
-            "CREATE UNIQUE INDEX IF NOT EXISTS indexed_chunk_index ON indexed_chunk2(chunkid, generation)";
-        connection.execute(query, ()).unwrap();
-
-        Self { connection }
-    }
-
-    fn execute(self: &Self, sql: &str) -> SQLResult<()> {
-        self.connection.execute(sql, ()).unwrap();
-        Ok(())
-    }
-
-    fn query(self: &Self, sql: &str) -> Statement<'_> {
-        self.connection.prepare(&sql).unwrap()
-    }
-
-    fn begin_transaction(&self) -> SQLResult<()> {
-        self.connection.execute("BEGIN", ()).unwrap();
-        Ok(())
-    }
-
-    fn commit_transaction(&self) -> SQLResult<()> {
-        self.connection.execute("COMMIT", ()).unwrap();
-        Ok(())
-    }
-
-    fn add_doc(self: &Self, metadata: &str, hash: &str, body: &str) -> SQLResult<()> {
-        self.connection.execute(
-            "INSERT OR IGNORE INTO document VALUES(?1, ?2, ?3)",
-            (&metadata, &hash, &body),
-        )?;
-        Ok(())
-    }
-
-    fn add_chunk(self: &Self, hash: &str, embeddings: &Vec<u8>) -> SQLResult<()> {
-        self.connection
-            .execute(
-                "INSERT OR REPLACE INTO chunk VALUES(?1, ?2)",
-                (&hash, embeddings),
-            )
-            .unwrap();
-        Ok(())
-    }
-
-    fn add_bucket(
-        self: &Self,
-        id: u32,
-        generation: u32,
-        center: &Vec<u8>,
-        indices: &Vec<u8>,
-        residuals: &Vec<u8>,
-    ) -> SQLResult<()> {
-        self.connection
-            .execute(
-                "INSERT OR REPLACE INTO bucket VALUES(?1, ?2, ?3, ?4, ?5)",
-                (id, generation, center, indices, residuals),
-            )
-            .unwrap();
-        Ok(())
-    }
-
-    fn add_indexed_chunk(self: &Self, chunkid: u32, generation: u32) -> SQLResult<()> {
-        self.connection
-            .execute(
-                "INSERT OR REPLACE INTO indexed_chunk2 VALUES(?1, ?2)",
-                (chunkid, generation),
-            )
-            .unwrap();
-        Ok(())
-    }
-}
-
 fn u8_to_vec_u32(bytes: &[u8]) -> Vec<u32> {
     let u32_size = size_of::<u32>();
 
@@ -975,10 +770,6 @@ fn u8_to_vec_u32(bytes: &[u8]) -> Vec<u32> {
         u32s.push(u32::from_ne_bytes(arr));
     }
     u32s
-}
-
-fn normalize_l2(v: &Tensor) -> Result<Tensor> {
-    Ok(v.broadcast_div(&v.sqr()?.sum_keepdim(2)?.sqrt()?)?)
 }
 
 pub fn embed_chunks(db: &DB, device: &Device) -> Result<()> {
@@ -1212,84 +1003,4 @@ pub fn score_query_sentences(
         now.elapsed().as_millis()
     );
     Ok(scores)
-}
-
-pub fn bulk_search(
-    db: &DB,
-    embedder: &Embedder,
-    csvname: &String,
-    outputname: &String,
-    use_fulltext: bool,
-    use_semantic: bool,
-) -> Result<()> {
-    let file = File::open(csvname)?;
-    let mut rdr = csv::ReaderBuilder::new()
-        .delimiter(b'\t')
-        .has_headers(false)
-        .from_reader(file);
-
-    let file = File::create(outputname).unwrap();
-    let mut writer = BufWriter::new(file);
-
-    let mut metadata_query = db.query("SELECT metadata FROM document WHERE rowid = ?1");
-    let mut histogram = histogram::Histogram::new(10000);
-    let mut embedder_histogram = histogram::Histogram::new(10000);
-
-    for result in rdr.deserialize() {
-        let record: (String, String) = result?;
-        let key = record.0;
-        let question = record.1;
-
-        println!("\nSearching for: {}", question);
-        let now = std::time::Instant::now();
-        let fts_idxs = if use_fulltext {
-            fulltext_search(&db, &question, None)?
-        } else {
-            [].to_vec()
-        };
-
-        let sem_matches = if use_semantic {
-            let now = std::time::Instant::now();
-            let qe = embedder.embed(&question)?.get(0)?;
-            qe.device().synchronize().unwrap();
-            let embedder_latency_ms = now.elapsed().as_millis() as u32;
-            embedder_histogram.record(embedder_latency_ms);
-            println!("embedder took {} ms.", now.elapsed().as_millis());
-            match_centroids(&db, &qe, 0.0, 100, None).unwrap()
-        } else {
-            [].to_vec()
-        };
-        let sem_idxs: Vec<u32> = sem_matches.iter().map(|&(_, idx)| idx).collect();
-        if use_semantic {
-            println!("semantic search found {} matches", sem_idxs.len());
-        }
-
-        let fused = if use_fulltext && use_semantic {
-            reciprocal_rank_fusion(&fts_idxs, &sem_idxs, 60.0)
-        } else if use_fulltext {
-            fts_idxs
-        } else {
-            sem_idxs
-        };
-
-        let mut metadatas = vec![];
-        for idx in fused {
-            let metadata = metadata_query.query_row((idx,), |row| Ok(row.get::<_, String>(0)?))?;
-            metadatas.push(metadata);
-        }
-        let total_ms = now.elapsed().as_millis();
-        histogram.record(total_ms.try_into().unwrap());
-        println!("search took {} ms in total", now.elapsed().as_millis());
-
-        write!(writer, "{}\t", key).unwrap();
-        for metadata in &metadatas {
-            let data: CorpusMetaData = serde_json::from_str(metadata)?;
-            write!(writer, "{},", data.key).unwrap();
-        }
-        write!(writer, "\n").unwrap();
-        writer.flush().unwrap();
-    }
-    println!("p95 embedder latency = {} ms", embedder_histogram.p95());
-    println!("p95 total search latency = {} ms", histogram.p95());
-    Ok(())
 }
