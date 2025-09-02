@@ -46,7 +46,7 @@ class XTR(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.encoder = AutoModel.from_pretrained("google/xtr-base-en", torch_dtype=torch.float16, use_safetensors=True).encoder
+        self.encoder = AutoModel.from_pretrained("google/xtr-base-en", dtype=torch.float16, use_safetensors=True).encoder
         self.encoder.linear = torch.nn.Linear(768, 128, bias=False)
 
         to_dense_path = hf_hub_download(repo_id="google/xtr-base-en", filename="2_Dense/pytorch_model.bin")
