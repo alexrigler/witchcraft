@@ -14,8 +14,8 @@ async function run(command) {
 
 async function build(name, version, platform, arch) {
   if (platform == 'darwin') {
-    await run(`cargo build --release --target aarch64-apple-darwin --features accelerate`);
-    await run(`cargo build --release --target x86_64-apple-darwin --features accelerate`);
+    await run(`cargo build --locked --release --target aarch64-apple-darwin --features accelerate`);
+    await run(`cargo build --locked --release --target x86_64-apple-darwin --features accelerate`);
 	await run(`lipo -create target/aarch64-apple-darwin/release/libwarp.dylib target/x86_64-apple-darwin/release/libwarp.dylib -output warp.node`);
   } else if (platform == 'win32') {
     var target = "";
@@ -29,8 +29,8 @@ async function build(name, version, platform, arch) {
       console.error(`unsupported warp target ${platform} ${arch}`);
       return;
     }
-	await run(`cargo xwin build --release --target ${target}-pc-windows-msvc`);
-	await run(`target/${target}-pc-windows-msvc/release/warp.dll warp.node`);
+	await run(`cargo xwin build --locked --release --target ${target}-pc-windows-msvc`);
+	await run(`cp target/${target}-pc-windows-msvc/release/warp.dll warp.node`);
   }
 }
 
