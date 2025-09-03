@@ -2,7 +2,6 @@ use anyhow::Result;
 use std::env;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use sha2::{Digest, Sha256};
 use std::io::{BufWriter, Write};
 use csv;
 
@@ -36,11 +35,7 @@ pub fn read_csv(db: &DB, csvname: std::path::PathBuf) -> Result<()> {
         let metadata = CorpusMetaData { key: record.name };
         let metadata = serde_json::to_string(&metadata)?;
         let body = record.body;
-
-        let mut hasher = Sha256::new();
-        hasher.update(&body);
-        let hash = format!("{:x}", hasher.finalize());
-        db.add_doc(&metadata, &hash, &body).unwrap();
+        db.add_doc(&metadata, &body).unwrap();
     }
 
     Ok(())

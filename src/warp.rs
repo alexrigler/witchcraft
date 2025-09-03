@@ -3,7 +3,6 @@
 use indicatif::ProgressBar;
 use once_cell::sync::Lazy;
 use rusqlite::Statement;
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::RwLock;
@@ -227,7 +226,7 @@ fn write_buckets(db: &DB, centers: &Tensor, device: &Device) -> Result<()> {
     db.begin_transaction().unwrap();
 
     let max_generation = db
-        .query("SELECT max(generation) FROM indexed_chunk2")
+        .query("SELECT max(generation) FROM indexed_chunk")
         .query_row((), |row| Ok(row.get::<_, u32>(0)?))
         .unwrap_or(0);
     let next_generation = max_generation + 1;
@@ -246,7 +245,7 @@ fn write_buckets(db: &DB, centers: &Tensor, device: &Device) -> Result<()> {
         )
         .unwrap();
     }
-    println!("write {} chunk ids to indexed_chunk2", all_chunkids.len());
+    println!("write {} chunk ids to indexed_chunk", all_chunkids.len());
     for chunkid in all_chunkids {
         db.add_indexed_chunk(chunkid, next_generation).unwrap();
     }
@@ -254,7 +253,7 @@ fn write_buckets(db: &DB, centers: &Tensor, device: &Device) -> Result<()> {
     db.query("DELETE FROM bucket WHERE generation <= ?1")
         .execute((max_generation,))
         .unwrap();
-    db.query("DELETE FROM indexed_chunk2 WHERE generation <= ?1")
+    db.query("DELETE FROM indexed_chunk WHERE generation <= ?1")
         .execute((max_generation,))
         .unwrap();
     db.commit_transaction().unwrap();
@@ -412,7 +411,7 @@ pub fn match_centroids(
     sql_filter: Option<&str>,
 ) -> Result<Vec<(f32, u32)>> {
     let max_generation = db
-        .query("SELECT MAX(generation) FROM indexed_chunk2")
+        .query("SELECT MAX(generation) FROM indexed_chunk")
         .query_row((), |row| Ok(row.get::<_, u32>(0)?))
         .unwrap_or(0);
 
@@ -546,7 +545,7 @@ pub fn match_centroids(
         JOIN chunk AS c ON c.hash = d.hash
         WHERE NOT EXISTS (
           SELECT 1
-          FROM indexed_chunk2 AS i
+          FROM indexed_chunk AS i
           WHERE i.chunkid = c.rowid
             AND i.generation = ?1
         )",
@@ -696,14 +695,6 @@ fn split_tensor(tensor: &Tensor) -> Vec<Tensor> {
         .collect()
 }
 
-pub fn add_doc_from_string(db: &DB, metadata: &str, body: &str) -> Result<()> {
-    let mut hasher = Sha256::new();
-    hasher.update(&body);
-    let hash = format!("{:x}", hasher.finalize());
-    db.add_doc(metadata, &hash, &body).unwrap();
-    Ok(())
-}
-
 pub struct Gatherer<'a> {
     documents: Box<dyn Iterator<Item = (String, String)> + 'a>,
     embedder: &'a Embedder,
@@ -797,7 +788,7 @@ pub fn embed_chunks(db: &DB, device: &Device) -> Result<()> {
         //println!("quantization took {} ms.", now.elapsed().as_millis());
 
         //let now = std::time::Instant::now();
-        db.add_chunk(&hash, &bytes).unwrap();
+        db.add_chunk(&hash, "xtr-base-en", &bytes).unwrap();
         //println!("database insert took {} ms.", now.elapsed().as_millis());
     }
     Ok(())
@@ -807,9 +798,9 @@ pub fn count_unindexed_chunks(db: &DB) -> Result<usize> {
     let mut unindexed_chunks_query = db.query(&format!(
         "SELECT IFNULL(SUM(length(c.embeddings)), 0)/{EMBEDDING_DIM} AS total
         FROM chunk AS c
-        LEFT JOIN indexed_chunk2 AS i
+        LEFT JOIN indexed_chunk AS i
         ON i.chunkid = c.rowid
-        AND i.generation = (SELECT MAX(generation) FROM indexed_chunk2)
+        AND i.generation = (SELECT MAX(generation) FROM indexed_chunk)
         WHERE i.chunkid IS NULL"
     ));
 

@@ -1,4 +1,7 @@
 use rusqlite::{Connection, OpenFlags, Result as SQLResult, Statement};
+use sha2::{Digest, Sha256};
+
+const HASH_CHARS: usize = 16; // we'll use sha256 truncated at 64 bits/16 characters
 
 pub struct DB {
     connection: Connection,
@@ -21,9 +24,10 @@ impl DB {
             .busy_timeout(std::time::Duration::from_secs(5))
             .unwrap();
 
-        let query = "CREATE TABLE IF NOT EXISTS document(metadata JSON,
-            hash TEXT NOT NULL, body TEXT, UNIQUE(metadata, hash))";
-        connection.execute(query, ()).unwrap();
+        let query = format!("CREATE TABLE IF NOT EXISTS document(metadata JSON, hash TEXT
+            CHECK (length(hash) = {HASH_CHARS}),
+            body TEXT, UNIQUE(metadata, hash))");
+        connection.execute(&query, ()).unwrap();
 
         let query = "CREATE INDEX IF NOT EXISTS document_index ON document(hash)";
         connection.execute(query, ()).unwrap();
@@ -34,8 +38,11 @@ impl DB {
         let query = "INSERT INTO document_fts(document_fts) VALUES('rebuild')";
         connection.execute(query, ()).unwrap();
 
-        let query = "CREATE TABLE IF NOT EXISTS chunk(hash TEXT PRIMARY KEY NOT NULL, embeddings BLOB NOT NULL)";
-        connection.execute(query, ()).unwrap();
+        let query = format!("CREATE TABLE IF NOT EXISTS chunk(hash TEXT PRIMARY KEY
+            CHECK (length(hash) = {HASH_CHARS}),
+            model TEXT,
+            embeddings BLOB NOT NULL)");
+        connection.execute(&query, ()).unwrap();
 
         let query = "CREATE INDEX IF NOT EXISTS chunk_index ON chunk(hash)";
         connection.execute(query, ()).unwrap();
@@ -48,14 +55,11 @@ impl DB {
         let query = "CREATE INDEX IF NOT EXISTS bucket_index ON bucket(generation, id)";
         connection.execute(query, ()).unwrap();
 
-        let query = "DROP TABLE IF EXISTS indexed_chunk"; // replaced by indexed_chunk2
-        connection.execute(query, ()).unwrap();
-
-        let query = "CREATE TABLE IF NOT EXISTS indexed_chunk2(chunkid INTEGER PRIMARY KEY NOT NULL, generation INTEGER NOT NULL)";
+        let query = "CREATE TABLE IF NOT EXISTS indexed_chunk(chunkid INTEGER PRIMARY KEY NOT NULL, generation INTEGER NOT NULL)";
         connection.execute(query, ()).unwrap();
 
         let query =
-            "CREATE UNIQUE INDEX IF NOT EXISTS indexed_chunk_index ON indexed_chunk2(chunkid, generation)";
+            "CREATE UNIQUE INDEX IF NOT EXISTS indexed_chunk_index ON indexed_chunk(chunkid, generation)";
         connection.execute(query, ()).unwrap();
 
         Self { connection }
@@ -80,7 +84,11 @@ impl DB {
         Ok(())
     }
 
-    pub fn add_doc(self: &Self, metadata: &str, hash: &str, body: &str) -> SQLResult<()> {
+    pub fn add_doc(self: &Self, metadata: &str, body: &str) -> SQLResult<()> {
+        let mut hasher = Sha256::new();
+        hasher.update(&body);
+        let hash = format!("{:x}", hasher.finalize());
+        let hash = &hash[..HASH_CHARS];
         self.connection.execute(
             "INSERT OR IGNORE INTO document VALUES(?1, ?2, ?3)",
             (&metadata, &hash, &body),
@@ -88,11 +96,11 @@ impl DB {
         Ok(())
     }
 
-    pub fn add_chunk(self: &Self, hash: &str, embeddings: &Vec<u8>) -> SQLResult<()> {
+    pub fn add_chunk(self: &Self, hash: &str, model: &str, embeddings: &Vec<u8>) -> SQLResult<()> {
         self.connection
             .execute(
-                "INSERT OR REPLACE INTO chunk VALUES(?1, ?2)",
-                (&hash, embeddings),
+                "INSERT OR REPLACE INTO chunk VALUES(?1, ?2, ?3)",
+                (&hash, &model, embeddings),
             )
             .unwrap();
         Ok(())
@@ -118,7 +126,7 @@ impl DB {
     pub fn add_indexed_chunk(self: &Self, chunkid: u32, generation: u32) -> SQLResult<()> {
         self.connection
             .execute(
-                "INSERT OR REPLACE INTO indexed_chunk2 VALUES(?1, ?2)",
+                "INSERT OR REPLACE INTO indexed_chunk VALUES(?1, ?2)",
                 (chunkid, generation),
             )
             .unwrap();
