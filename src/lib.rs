@@ -1,5 +1,6 @@
 /* Node module API for Warp */
 
+use iso8601_timestamp::Timestamp;
 use napi::bindgen_prelude::*;
 use napi::{Env, ScopedTask};
 use napi_derive::napi;
@@ -10,7 +11,23 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-type Job = (String, String, String);
+use uuid::Uuid;
+
+enum Job {
+    Add {
+        uuid: Uuid,
+        date: Option<Timestamp>,
+        metadata: String,
+        body: String,
+    },
+    Remove {
+        uuid: Uuid,
+    },
+    Index,
+    Embed,
+    Clear,
+    Shutdown,
+}
 
 #[derive(Debug)]
 pub struct Indexer {
@@ -38,34 +55,47 @@ impl Indexer {
         let handle = thread::spawn(move || {
             let device = warp::make_device();
             while let Ok(job) = rx.recv() {
-                let (command, arg1, arg2) = job;
-
-                if command == "clear" {
-                    db.clear();
-                    CLEAR.store(false, Ordering::Release);
-                } else if command == "shutdown" {
-                    db.shutdown();
-                    return;
+                match job {
+                    Job::Clear => {
+                        db.clear();
+                        CLEAR.store(false, Ordering::Release);
+                    }
+                    Job::Shutdown => {
+                        db.shutdown();
+                        return;
+                    }
+                    _ => {}
                 }
 
                 if drain_commands() {
                     continue;
                 }
 
-                if command == "add" {
-                    db.add_doc(&arg1, &arg2).unwrap();
-                } else if command == "index" {
-                    let count = warp::count_unindexed_chunks(&db).unwrap();
-                    if count >= 2048 {
-                        warp::index_chunks(&db, &device).unwrap();
+                match job {
+                    Job::Add {
+                        uuid,
+                        date,
+                        metadata,
+                        body,
+                    } => {
+                        db.add_doc(&uuid, date, &metadata, &body).unwrap();
                     }
-                } else if command == "embed" {
-                    loop {
+                    Job::Remove { uuid } => {
+                        db.remove_doc(&uuid).unwrap();
+                    }
+                    Job::Index => {
+                        let count = warp::count_unindexed_chunks(&db).unwrap();
+                        if count >= 2048 {
+                            warp::index_chunks(&db, &device).unwrap();
+                        }
+                    }
+                    Job::Embed => loop {
                         let got = warp::embed_chunks(&db, &device, Some(10)).unwrap();
                         if got == 0 || drain_commands() {
                             break;
                         }
-                    }
+                    },
+                    _ => {}
                 }
             }
         });
@@ -84,43 +114,46 @@ impl Indexer {
             .expect("Indexer not initialized. Call `Indexer::init_global()` first.")
     }
 
-    pub fn add(&self, metadata: String, body: String) {
+    pub fn add(&self, uuid: Uuid, date: Option<Timestamp>, metadata: String, body: String) {
         if accepting_commands() {
-            let _ = self.tx.send(("add".to_string(), metadata, body));
+            let _ = self.tx.send(Job::Add {
+                uuid,
+                date,
+                metadata,
+                body,
+            });
+        }
+    }
+
+    pub fn remove(&self, uuid: Uuid) {
+        if accepting_commands() {
+            let _ = self.tx.send(Job::Remove { uuid });
         }
     }
 
     pub fn embed(&self) {
         if accepting_commands() {
-            let _ = self
-                .tx
-                .send(("embed".to_string(), String::new(), String::new()));
+            let _ = self.tx.send(Job::Embed);
         }
     }
 
     pub fn index(&self) {
         if accepting_commands() {
-            let _ = self
-                .tx
-                .send(("index".to_string(), String::new(), String::new()));
+            let _ = self.tx.send(Job::Index);
         }
     }
 
     pub fn clear(&self) {
         if accepting_commands() {
             CLEAR.store(true, Ordering::Release);
-            let _ = self
-                .tx
-                .send(("clear".to_string(), String::new(), String::new()));
+            let _ = self.tx.send(Job::Clear);
         }
     }
 
     pub fn shutdown(&self) {
         if accepting_commands() {
             SHUTDOWN.store(true, Ordering::Release);
-            let _ = self
-                .tx
-                .send(("shutdown".to_string(), String::new(), String::new()));
+            let _ = self.tx.send(Job::Shutdown);
             if let Some(h) = self.handle.lock().unwrap().take() {
                 h.join().unwrap();
             }
@@ -303,8 +336,16 @@ impl Warp {
     }
 
     #[napi]
-    pub fn add(&self, metadata: String, body: String) {
-        Indexer::global().add(metadata, body);
+    pub fn add(&self, uuid: String, date: String, metadata: String, body: String) {
+        let uuid = Uuid::parse_str(&uuid).unwrap();
+        let date = Timestamp::parse(date.as_str());
+        Indexer::global().add(uuid, date, metadata, body);
+    }
+
+    #[napi]
+    pub fn remove(&self, uuid: String) {
+        let uuid = Uuid::parse_str(&uuid).unwrap();
+        Indexer::global().remove(uuid);
     }
 
     #[napi]

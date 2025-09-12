@@ -1,5 +1,7 @@
+use iso8601_timestamp::Timestamp;
 use rusqlite::{Connection, OpenFlags, Result as SQLResult, Statement};
 use sha2::{Digest, Sha256};
+use uuid::Uuid;
 
 const HASH_CHARS: usize = 32; // we'll use sha256 truncated at 128 bits/32 characters
 
@@ -31,11 +33,16 @@ impl DB {
             .unwrap();
 
         let query = format!(
-            "CREATE TABLE IF NOT EXISTS document(metadata JSON, hash TEXT
+            "CREATE TABLE IF NOT EXISTS document(uuid TEXT NOT NULL PRIMARY KEY,
+            date TEXT NOT NULL,
+            metadata JSON, hash TEXT
             CHECK (length(hash) = {HASH_CHARS}),
-            body TEXT, UNIQUE(metadata, hash))"
+            body TEXT)"
         );
         connection.execute(&query, ()).unwrap();
+
+        let query = "CREATE INDEX IF NOT EXISTS document_uuid_index ON document(uuid)";
+        connection.execute(query, ()).unwrap();
 
         let query = "CREATE INDEX IF NOT EXISTS document_index ON document(hash)";
         connection.execute(query, ()).unwrap();
@@ -55,6 +62,15 @@ impl DB {
         connection.execute(&query, ()).unwrap();
 
         let query = "CREATE INDEX IF NOT EXISTS chunk_index ON chunk(hash)";
+        connection.execute(query, ()).unwrap();
+
+        let query = "CREATE TRIGGER IF NOT EXISTS document_after_delete
+            AFTER DELETE ON document
+            BEGIN
+              DELETE FROM chunk
+              WHERE hash = OLD.hash
+                AND NOT EXISTS (SELECT 1 FROM document WHERE hash = OLD.hash);
+            END";
         connection.execute(query, ()).unwrap();
 
         let query = "CREATE TABLE IF NOT EXISTS bucket(id INTEGER PRIMARY KEY,
@@ -113,20 +129,39 @@ impl DB {
         Ok(())
     }
 
-    pub fn add_doc(self: &mut Self, metadata: &str, body: &str) -> SQLResult<()> {
+    pub fn add_doc(
+        self: &mut Self,
+        uuid: &Uuid,
+        date: Option<Timestamp>,
+        metadata: &str,
+        body: &str,
+    ) -> SQLResult<()> {
         let mut hasher = Sha256::new();
         hasher.update(&body);
         let hash = format!("{:x}", hasher.finalize());
         let hash = &hash[..HASH_CHARS];
+        let date = date.unwrap_or_else(Timestamp::now_utc);
+
         self.connection.execute(
-            "INSERT OR IGNORE INTO document VALUES(?1, ?2, ?3)",
-            (&metadata, &hash, &body),
+            "INSERT OR IGNORE INTO document VALUES(?1, ?2, ?3, ?4, ?5)",
+            (&uuid.to_string(), date.to_string(), metadata, &hash, &body),
         )?;
         self.remove_on_shutdown = false;
         Ok(())
     }
 
-    pub fn add_chunk(self: &Self, hash: &str, model: &str, embeddings: &Vec<u8>) -> SQLResult<()> {
+    pub fn remove_doc(self: &mut Self, uuid: &Uuid) -> SQLResult<()> {
+        self.connection
+            .execute("DELETE FROM document WHERE uuid = ?1)", (uuid.to_string(),))?;
+        Ok(())
+    }
+
+    pub fn add_chunk(
+        self: &Self,
+        hash: &str,
+        model: &str,
+        embeddings: &Vec<u8>,
+    ) -> SQLResult<()> {
         self.connection
             .execute(
                 "INSERT OR REPLACE INTO chunk VALUES(?1, ?2, ?3)",

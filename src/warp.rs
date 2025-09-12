@@ -759,6 +759,7 @@ impl<'a> Iterator for Gatherer<'a> {
                     .unwrap()
                     .to_device(&Device::Cpu)
                     .unwrap();
+                let embeddings = embeddings.to_device(&Device::Cpu).unwrap();
 
                 let (_b, m, _n) = embeddings.dims3().unwrap();
                 let dt = now.elapsed().as_secs_f64();

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs::File;
 use std::io::{BufWriter, Write};
+use uuid::Uuid;
 
 mod histogram;
 mod warp;
@@ -35,7 +36,8 @@ pub fn read_csv(db: &mut DB, csvname: std::path::PathBuf) -> Result<()> {
         let metadata = CorpusMetaData { key: record.name };
         let metadata = serde_json::to_string(&metadata)?;
         let body = record.body;
-        db.add_doc(&metadata, &body).unwrap();
+        let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.as_bytes());
+        db.add_doc(&uuid, None, &metadata, &body).unwrap();
     }
 
     Ok(())
