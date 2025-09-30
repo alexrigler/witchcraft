@@ -154,7 +154,7 @@ impl DB {
         let date = date.unwrap_or_else(Timestamp::now_utc);
 
         self.connection.execute(
-            "INSERT OR IGNORE INTO document VALUES(?1, ?2, ?3, ?4, ?5)",
+            "REPLACE INTO document VALUES(?1, ?2, ?3, ?4, ?5)",
             (&uuid.to_string(), date.to_string(), metadata, &hash, &body),
         )?;
         self.remove_on_shutdown = false;
