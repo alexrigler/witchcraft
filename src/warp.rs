@@ -481,6 +481,8 @@ pub fn match_centroids(
         .query("SELECT MAX(generation) FROM indexed_chunk")?
         .query_row((), |row| Ok(row.get::<_, u32>(0)?))
         .unwrap_or(0);
+    let mut bucket_query =
+        db.query("SELECT indices,residuals FROM bucket WHERE generation = ?1 and id = ?2")?;
 
     let k = 32;
     let t_prime = 40000;
@@ -494,6 +496,7 @@ pub fn match_centroids(
 
     let (cluster_ids, sizes, centers, centers_matrix) =
         get_centers(&db, &device, max_generation as u64)?;
+
 
     if centers.len() > 0 {
         let now = std::time::Instant::now();
@@ -539,46 +542,34 @@ pub fn match_centroids(
 
         let now = std::time::Instant::now();
 
-        db.execute("CREATE TEMPORARY TABLE temp(id INTEGER)")?;
-        let mut bucket_query = db.query(
-            "SELECT bucket.id,indices,residuals FROM bucket
-                JOIN temp ON bucket.id = temp.id
-                WHERE generation = ?1",
-        )?;
-        let mut insert_temp_query = db.query("INSERT INTO TEMP VALUES(?1)")?;
-
         for i in topk_clusters {
-            let _ = insert_temp_query.execute((cluster_ids[i as usize],));
-        }
 
-        let results = bucket_query.query_map((max_generation,), |row| {
-            Ok((
-                row.get::<_, u32>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-            ))
-        })?;
+            let (document_indices, document_embeddings) = bucket_query
+                .query_row((max_generation, cluster_ids[i as usize]), |row| {
+                    Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
+                })?;
 
-        for result in results {
-            let (cluster_id, document_indices, document_embeddings) = result?;
+            match centers.get(i as usize) {
+                Some(center) => {
+                    let document_indices = u8_to_vec_u32(&document_indices);
 
-            let center = &centers[cluster_id as usize];
-            let document_indices = u8_to_vec_u32(&document_indices);
+                    //let residuals = Tensor::from_q4_bytes(&document_embeddings, EMBEDDING_DIM, &device)?.dequantize(4)?.inv_compand()?;
+                    let residuals =
+                        Tensor::from_companded_q4_bytes(&document_embeddings, EMBEDDING_DIM, &Device::Cpu)?;
+                    let embeddings = residuals.broadcast_add(&center)?;
+                    all_document_embeddings.push(embeddings);
 
-            //let residuals = Tensor::from_q4_bytes(&document_embeddings, EMBEDDING_DIM, &device)?.dequantize(4)?.inv_compand()?;
-            let residuals =
-                Tensor::from_companded_q4_bytes(&document_embeddings, EMBEDDING_DIM, &Device::Cpu)?;
-            let embeddings = residuals.broadcast_add(&center)?;
-            all_document_embeddings.push(embeddings);
-
-            let (m, _) = residuals.dims2()?;
-            for j in 0..m {
-                all.push((document_indices[j], count));
-                count += 1;
+                    let (m, _) = residuals.dims2()?;
+                    for j in 0..m {
+                        all.push((document_indices[j], count));
+                        count += 1;
+                    }
+                }
+                None => {
+                    warn!("OOB array access i={i}, skipping entry!");
+                }
             }
         }
-        db.execute("DROP TABLE temp")?;
-
         debug!(
             "reading in {} indexed embeddings took {} ms.",
             count,
