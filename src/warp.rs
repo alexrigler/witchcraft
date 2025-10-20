@@ -365,9 +365,11 @@ fn write_buckets(db: &DB, centers: &Tensor, device: &Device) -> Result<()> {
     }
 }
 
+/*
 fn bm25_to_cosine_approx(bm25: f32) -> f32 {
     1.0 - (1.0 / (1.0 + (-bm25 / 2.0).exp())) // logistic-shaped
 }
+*/
 
 pub fn fulltext_search(
     db: &DB,
@@ -427,8 +429,9 @@ pub fn fulltext_search(
         ))
     })?;
     for result in results {
-        let (rowid, body, lens, score) = result?;
-        let score2 = bm25_to_cosine_approx(score);
+        let (rowid, body, lens, _score) = result?;
+        //let score2 = 0.0f32;//bm25_to_cosine_approx(score);
+        let score2 = strsim::jaro_winkler(&q, &body) as f32;
 
         let lens: Vec<usize> = lens
             .split(',')
@@ -457,7 +460,7 @@ pub fn reciprocal_rank_fusion(list1: &[u32], list2: &[u32], k: f64) -> Vec<u32> 
     let mut scores: HashMap<u32, f64> = HashMap::new();
 
     for (rank, &doc_id) in list1.iter().enumerate() {
-        let score = 1.0 / (k + rank as f64);
+        let score = 1.0 / (3.0 + k + rank as f64);
         *scores.entry(doc_id).or_insert(0.0) += score;
     }
 
@@ -1164,15 +1167,13 @@ pub fn search(
     let mut scores: HashMap<u32, f32> = HashMap::new();
     let mut offsets: HashMap<u32, u32> = HashMap::new();
 
-    for (_score, idx, body_idx) in &fts_matches {
-        offsets.insert(*idx, *body_idx);
+    for (score, idx, offset) in &fts_matches {
+        scores.insert(*idx, *score);
+        offsets.insert(*idx, *offset);
     }
     for (score, idx, offset) in &sem_matches {
         scores.insert(*idx, *score);
         offsets.insert(*idx, *offset);
-    }
-    for (score, idx, _body_idx) in &fts_matches {
-        scores.insert(*idx, *score);
     }
 
     let sem_idxs: Vec<u32> = sem_matches.iter().map(|&(_, idx, _)| idx).collect();
