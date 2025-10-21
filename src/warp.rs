@@ -610,26 +610,25 @@ pub fn match_centroids(
             let row = sorted_indices.get(i)?;
             let row_scores_sorted = query_centroid_similarity.get(i)?.gather(&row, D::Minus1)?;
             let row_scores_sorted = row_scores_sorted.to_vec1::<f32>()?;
+            let row = row.to_vec1::<u32>()?;
             let mut cumsum = 0;
             let mut score = 0.0f32;
-            for j in 0..n {
-                let idx = row.get(j)?.to_scalar::<u32>()?;
-                if j < k {
-                    topk_clusters.push(idx);
-                }
+            for j in 0..n.min(k) {
+                let idx = row[j];
+                topk_clusters.push(idx);
                 let size = sizes[idx as usize];
                 if cumsum < t_prime {
                     score = row_scores_sorted[j];
                 }
                 cumsum += size;
 
-                if j >= k || cumsum >= t_prime {
+                if cumsum >= t_prime {
                     break;
                 }
             }
             missing.push(score);
         }
-        topk_clusters.sort();
+        topk_clusters.sort_unstable();
         topk_clusters.dedup();
         debug!(
             "finding top-{} out of {} clusters took {} ms.",
