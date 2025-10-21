@@ -5,7 +5,7 @@ use napi::{Env, ScopedTask};
 use napi_derive::napi;
 
 use std::{
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{mpsc, Arc, Mutex, OnceLock},
     thread::{self, JoinHandle},
     path::PathBuf,
@@ -17,6 +17,33 @@ use log::{info, warn, LevelFilter, Log, Metadata, Record};
 use napi::bindgen_prelude::*; // Env, Function, Result, etc.
 use napi::threadsafe_function::ThreadsafeCallContext;
 use once_cell::sync::OnceCell;
+
+use std::alloc::{GlobalAlloc, System, Layout};
+
+static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+
+struct StatsAllocator;
+
+unsafe impl GlobalAlloc for StatsAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let _ = ALLOCATED.fetch_add(layout.size(), Ordering::SeqCst);
+        unsafe { System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let _ = ALLOCATED.fetch_sub(layout.size(), Ordering::SeqCst);
+        unsafe { System.dealloc(ptr, layout) }
+    }
+}
+
+#[global_allocator]
+static STATSALLOCATOR: StatsAllocator = StatsAllocator;
+
+fn memory_stats() {
+    let allocated = ALLOCATED.load(Ordering::Relaxed) as f64;
+    let mb = (1 << 20) as f64;
+    stats("megabytes-allocated", allocated / mb);
+}
 
 #[napi(object)]
 pub struct LogEvent {
@@ -274,6 +301,7 @@ impl Indexer {
                                 }
                                 stats("indexing-time-ms", now.elapsed().as_millis() as f64);
                             }
+                            memory_stats();
                         }
                         _ => {}
                     }
