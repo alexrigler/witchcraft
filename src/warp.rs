@@ -298,7 +298,15 @@ fn write_buckets(db: &DB, centers: &Tensor, device: &Device) -> Result<()> {
                     break;
                 }
 
-                keys.push(indices[sample]);
+                match indices.get(sample) {
+                    Some(pair) => {
+                        keys.push(*pair);
+                    }
+                    None => {
+                        warn!("unable to get key pair from indices @{sample}");
+                        keys.push((0, 0));
+                    }
+                }
 
                 let center = centers_cpu.get(bucket as usize)?;
                 let residual = (embeddings[sample].get(0) - &center)?;
