@@ -28,6 +28,7 @@ impl DB {
         const APP_ID: i32 = 0x07DB_DA55;
         const EXPECTED_VERSION: i32 = 2;
 
+        let mut first_creation = !db_fn.exists();
         let connection = Connection::open(&db_fn)?;
 
         let status: SQLResult<String> =
@@ -49,16 +50,20 @@ impl DB {
         let connection = if db_ok && schema_ok {
             connection
         } else {
-            warn!("warp database corrupted or schema mismatch, recreating it!");
+            warn!("warp database {} corrupted or schema mismatch, recreating it!", db_fn.display());
             connection.close().map_err(|(_conn, e)| e)?;
             std::fs::remove_file(&db_fn)
                 .map_err(|_e| rusqlite::Error::InvalidPath(db_fn.clone()))?;
             let _ = std::fs::remove_file(db_fn.with_extension("wal"));
             let _ = std::fs::remove_file(db_fn.with_extension("shm"));
+            first_creation = true;
             let connection = Connection::open(&db_fn)?;
-            connection.execute_batch(&format!("PRAGMA application_id = {APP_ID}; PRAGMA user_version = {EXPECTED_VERSION}"))?;
             connection
         };
+
+        if first_creation {
+            connection.execute_batch(&format!("PRAGMA application_id = {APP_ID}; PRAGMA user_version = {EXPECTED_VERSION}"))?;
+        }
 
         //connection
         //.pragma_update(None, "journal_mode", &"WAL")
