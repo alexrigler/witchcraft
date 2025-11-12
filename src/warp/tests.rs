@@ -4,7 +4,7 @@ mod tests {
     use crate::warp;
     use crate::warp::DB;
     use test_log::test;
-    use tempfile::Builder;
+    use tempfile::tempdir;
     use std::path::PathBuf;
 
     const FACTS : [&str; 33]= [
@@ -57,9 +57,8 @@ mod tests {
     #[test]
     fn test_end_to_end() -> std::io::Result<()> {
 
-        let tmp = Builder::new().prefix("warp-e2e-").suffix(".db").tempfile()?;
-        let (_file, path): (std::fs::File, PathBuf) = tmp.keep()?;
-
+        let dir = tempdir().unwrap();
+        let path: PathBuf = dir.path().join("warp");
         let mut db = DB::new(path.clone()).unwrap();
         let reader_db = DB::new_reader(path.clone()).unwrap();
 
@@ -116,8 +115,8 @@ mod tests {
 
     #[test]
     fn test_sub_docs() -> std::io::Result<()> {
-        let tmp = Builder::new().prefix("warp-subdoc-").suffix(".db").tempfile()?;
-        let (_file, path): (std::fs::File, PathBuf) = tmp.keep()?;
+        let dir = tempdir().unwrap();
+        let path: PathBuf = dir.path().join("warp");
 
         let mut db = DB::new(path.clone()).unwrap();
         let device = warp::make_device();
@@ -213,12 +212,19 @@ mod tests {
     #[test]
     fn test_open_corrupted_db() -> std::io::Result<()> {
         use std::io::Write;
-        let tmp = Builder::new().prefix("warp-corrupted-").suffix(".db").tempfile()?;
-        let (mut file, path): (std::fs::File, PathBuf) = tmp.keep()?;
-        let foo: u32 = 0xfede_abe0;
-        file.write_all(&foo.to_le_bytes())?;
-        file.flush()?;
-        let mut db = DB::new(path.to_path_buf()).unwrap();
+        let dir = tempdir().unwrap();
+        let path: PathBuf = dir.path().join("warp");
+        {
+            let foo: u32 = 0xfede_abe0;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .append(true)
+                .create(true)
+                .open(&path)?;
+            file.write_all(&foo.to_le_bytes())?;
+            file.flush()?;
+        }
+        let mut db = DB::new(path).unwrap();
         db.clear();
         db.shutdown();
         Ok(())
