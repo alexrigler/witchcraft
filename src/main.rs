@@ -1,7 +1,7 @@
 use anyhow::Result;
 use csv;
-use log::{Level, LevelFilter, Metadata, Record};
 use log::{debug, info};
+use log::{Level, LevelFilter, Metadata, Record};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs::File;
@@ -51,7 +51,6 @@ fn split_doc(body: String) -> Vec<String> {
         .collect()
 }
 
-
 pub fn read_csv(db: &mut DB, csvname: std::path::PathBuf) -> Result<()> {
     println!("register documents from CSV...");
 
@@ -71,7 +70,8 @@ pub fn read_csv(db: &mut DB, csvname: std::path::PathBuf) -> Result<()> {
         let lens = bodies.iter().map(|b| b.chars().count()).collect();
         let body = bodies.join("");
         let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.as_bytes());
-        db.add_doc(&uuid, None, &metadata, &body, Some(lens)).unwrap();
+        db.add_doc(&uuid, None, &metadata, &body, Some(lens))
+            .unwrap();
     }
 
     Ok(())

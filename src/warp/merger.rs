@@ -21,7 +21,10 @@ impl Writer {
     pub fn write_record(&mut self, value: u32, keys: &[(u32, u32)], data: &[u8]) -> io::Result<()> {
         let count = keys.len() as u32;
         if data.len() != count as usize * 64 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "data length must be count * 64"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "data length must be count * 64",
+            ));
         }
 
         self.writer.write_all(&value.to_ne_bytes())?;
@@ -95,7 +98,10 @@ impl Iterator for Merger {
                 Ok(None) => None,
                 Err(e) => return Some(Err(e)),
             } {
-                self.heap.push(HeapEntry { record, source: next.source });
+                self.heap.push(HeapEntry {
+                    record,
+                    source: next.source,
+                });
             }
         }
 
@@ -104,7 +110,10 @@ impl Iterator for Merger {
             Ok(None) => None,
             Err(e) => return Some(Err(e)),
         } {
-            self.heap.push(HeapEntry { record, source: current.source });
+            self.heap.push(HeapEntry {
+                record,
+                source: current.source,
+            });
         }
 
         // Sort keys and align data rows

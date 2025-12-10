@@ -24,7 +24,12 @@ pub trait TensorPackOps {
     fn stretch_rows(&self) -> Result<Tensor>;
     //fn from_q4_bytes(buffer: &[u8], cols: usize, device: &Device) -> Result<Tensor>;
     fn from_q8_bytes(buffer: &[u8], cols: usize, device: &Device) -> Result<Tensor>;
-    fn from_companded_q4_bytes(bytes: &[u8], cols: usize, table: &[f32; 16], device: &Device) -> Result<Tensor>;
+    fn from_companded_q4_bytes(
+        bytes: &[u8],
+        cols: usize,
+        table: &[f32; 16],
+        device: &Device,
+    ) -> Result<Tensor>;
     //fn from_companded_q8_bytes(buffer: &[u8], cols: usize, device: &Device) -> Result<Tensor>;
     fn from_f32_bytes(bytes: &[u8], cols: usize, device: &Device) -> Result<Tensor>;
     fn to_q4_bytes(&self) -> Result<Vec<u8>>;
@@ -184,7 +189,12 @@ impl TensorPackOps for Tensor {
         Ok(bytes)
     }
 
-    fn from_companded_q4_bytes(bytes: &[u8], cols: usize, table: &[f32; 16], device: &Device) -> Result<Tensor> {
+    fn from_companded_q4_bytes(
+        bytes: &[u8],
+        cols: usize,
+        table: &[f32; 16],
+        device: &Device,
+    ) -> Result<Tensor> {
         let mut out = Vec::with_capacity(bytes.len() * 2);
         for &byte in bytes {
             let high = (byte >> 4) & 0x0f;

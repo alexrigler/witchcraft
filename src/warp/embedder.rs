@@ -1,5 +1,5 @@
 use super::t5_encoder;
-use anyhow::{Result};
+use anyhow::Result;
 use candle_core::{Device, Tensor};
 use log::debug;
 use tokenizers::Tokenizer;
@@ -19,11 +19,7 @@ impl Embedder {
         Ok(Self { tokenizer, model })
     }
 
-    pub fn embed(
-        self: &Self,
-        text: &str,
-    ) -> Result<(Tensor, Vec<(usize, usize)>)> {
-
+    pub fn embed(self: &Self, text: &str) -> Result<(Tensor, Vec<(usize, usize)>)> {
         let now = std::time::Instant::now();
         let model = &self.model;
         let device = model.device();

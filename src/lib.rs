@@ -5,10 +5,10 @@ use napi::{Env, ScopedTask};
 use napi_derive::napi;
 
 use std::{
+    path::PathBuf,
     sync::atomic::{AtomicBool, AtomicUsize, Ordering},
     sync::{mpsc, Arc, Mutex, OnceLock},
     thread::{self, JoinHandle},
-    path::PathBuf,
 };
 
 use uuid::Uuid;
@@ -18,7 +18,7 @@ use napi::bindgen_prelude::*; // Env, Function, Result, etc.
 use napi::threadsafe_function::ThreadsafeCallContext;
 use once_cell::sync::OnceCell;
 
-use std::alloc::{GlobalAlloc, System, Layout};
+use std::alloc::{GlobalAlloc, Layout, System};
 
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 
@@ -134,9 +134,7 @@ pub struct StatsEvent {
 static STATSFN: OnceCell<Box<dyn Fn(StatsEvent) + Send + Sync>> = OnceCell::new();
 
 #[napi]
-pub fn set_stats_callback(
-    callback: Function<(LogEvent,), Unknown>,
-) -> Result<()> {
+pub fn set_stats_callback(callback: Function<(LogEvent,), Unknown>) -> Result<()> {
     use napi::threadsafe_function::ThreadsafeFunctionCallMode;
 
     // Safety: We're intentionally leaking the callback reference to make it 'static
@@ -260,20 +258,21 @@ impl Indexer {
                             Err(v) => {
                                 warn!("add_doc failed! {}", v);
                             }
-                        }
+                        },
                         Job::Remove { uuid } => match db.remove_doc(&uuid) {
                             Ok(()) => {}
                             Err(v) => {
                                 warn!("remove_doc failed! {}", v);
                             }
-                        }
-                        Job::Index=> {
+                        },
+                        Job::Index => {
                             let _ = db.refresh_ft();
                             loop {
                                 match &embedder {
                                     Some(embedder) => {
                                         let now = std::time::Instant::now();
-                                        let got = match warp::embed_chunks(&db, &embedder, Some(10)) {
+                                        let got = match warp::embed_chunks(&db, &embedder, Some(10))
+                                        {
                                             Ok(got) => got,
                                             Err(_v) => {
                                                 break;
@@ -323,7 +322,14 @@ impl Indexer {
             .expect("Indexer not initialized. Call `Indexer::init_global()` first.")
     }
 
-    pub fn add(&self, uuid: Uuid, date: Option<Timestamp>, metadata: String, body: String, lengths: Option<Vec<usize>>) {
+    pub fn add(
+        &self,
+        uuid: Uuid,
+        date: Option<Timestamp>,
+        metadata: String,
+        body: String,
+        lengths: Option<Vec<usize>>,
+    ) {
         if accepting_commands() {
             let _ = self.tx.send(Job::Add {
                 uuid,
@@ -565,7 +571,14 @@ impl Warp {
     }
 
     #[napi]
-    pub fn add(&self, uuid: String, date: String, metadata: String, body: String, lengths: Vec<u32>) {
+    pub fn add(
+        &self,
+        uuid: String,
+        date: String,
+        metadata: String,
+        body: String,
+        lengths: Vec<u32>,
+    ) {
         let uuid = Uuid::parse_str(&uuid).unwrap();
         let date = Timestamp::parse(date.as_str());
 

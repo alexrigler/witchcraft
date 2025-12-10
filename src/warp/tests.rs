@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod tests {
-    use uuid::Uuid;
     use crate::warp;
     use crate::warp::DB;
-    use test_log::test;
-    use tempfile::tempdir;
     use std::path::PathBuf;
+    use tempfile::tempdir;
+    use test_log::test;
+    use uuid::Uuid;
 
     const FACTS : [&str; 33]= [
         "Bananas are berries, but strawberries aren't.",
@@ -42,13 +42,13 @@ mod tests {
         "There's a lake in Australia that stays bright pink regardless of conditions.",
         "Cleopatra lived closer in time to the first moon landing than to the building of the Great Pyramid."
     ];
-    const QUERIES : [(&str, u32); 3] = [
+    const QUERIES: [(&str, u32); 3] = [
         ("a lake with funny colors", 31),
         ("A group of flamingos", 15),
         ("facts about fruits and berries", 0),
     ];
 
-    const EASY_QUERIES : [(&str, u32); 3] = [
+    const EASY_QUERIES: [(&str, u32); 3] = [
         ("a lake in Australia that stays bright pink", 31),
         ("A group of flamingos", 15),
         ("Bananas are berries", 0),
@@ -56,7 +56,6 @@ mod tests {
 
     #[test]
     fn test_end_to_end() -> std::io::Result<()> {
-
         let dir = tempdir().unwrap();
         let path: PathBuf = dir.path().join("warp");
         let mut db = DB::new(path.clone()).unwrap();
@@ -67,11 +66,12 @@ mod tests {
         let embedder = warp::Embedder::new(&device, &assets).unwrap();
         let mut cache = warp::EmbeddingsCache::new(4);
 
-        let mut uuids = vec!();
+        let mut uuids = vec![];
         for body in FACTS {
             let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.as_bytes());
             uuids.push(uuid.clone());
-            db.add_doc(&uuid, None, &uuid.to_string(), &body, None).unwrap();
+            db.add_doc(&uuid, None, &uuid.to_string(), &body, None)
+                .unwrap();
         }
         for round in 0..3 {
             warp::embed_chunks(&db, &embedder, None).unwrap();
@@ -79,8 +79,17 @@ mod tests {
             for (i, (q, pos)) in QUERIES.iter().enumerate() {
                 let use_fulltext = round == 0;
                 println!("searching for {q}");
-                let results =
-                    warp::search(&reader_db, &embedder, &mut cache, &q.to_string(), 0.75, 10, use_fulltext, None).unwrap();
+                let results = warp::search(
+                    &reader_db,
+                    &embedder,
+                    &mut cache,
+                    &q.to_string(),
+                    0.75,
+                    10,
+                    use_fulltext,
+                    None,
+                )
+                .unwrap();
                 if round == 0 {
                     assert!(results.len() == 1);
                 } else {
@@ -100,15 +109,25 @@ mod tests {
             db.remove_doc(&uuids[0].clone()).unwrap();
             warp::index_chunks(&db, &device).unwrap();
         }
-        let _ = warp::search(&reader_db, &embedder, &mut cache, &"".to_string(), 0.75, 10, true, None).unwrap();
+        let _ = warp::search(
+            &reader_db,
+            &embedder,
+            &mut cache,
+            &"".to_string(),
+            0.75,
+            10,
+            true,
+            None,
+        )
+        .unwrap();
         db.clear();
         db.shutdown();
 
         match std::fs::metadata(&path) {
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => { }
-                Err(e) => return Err(e),
-                Ok(_) => panic!("temp file still exists: {}", path.display()),
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+            Ok(_) => panic!("temp file still exists: {}", path.display()),
+        }
 
         Ok(())
     }
@@ -124,22 +143,43 @@ mod tests {
         let embedder = warp::Embedder::new(&device, &assets).unwrap();
         let mut cache = warp::EmbeddingsCache::new(4);
 
-        let mut lens = vec!();
+        let mut lens = vec![];
         for fact in FACTS {
             lens.push(fact.chars().count());
-        };
+        }
         let body = FACTS.join("");
         let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.as_bytes());
-        db.add_doc(&uuid, None, &uuid.to_string(), &body, Some(lens)).unwrap();
+        db.add_doc(&uuid, None, &uuid.to_string(), &body, Some(lens))
+            .unwrap();
 
         for (q, pos) in QUERIES {
-            let results = warp::search(&db, &embedder, &mut cache, &q.to_string(), 0.75, 10, false, None).unwrap();
+            let results = warp::search(
+                &db,
+                &embedder,
+                &mut cache,
+                &q.to_string(),
+                0.75,
+                10,
+                false,
+                None,
+            )
+            .unwrap();
             for (_score, _metadata, _body, body_idx) in results {
                 assert!(body_idx == pos);
             }
         }
         for (q, pos) in EASY_QUERIES {
-            let results = warp::search(&db, &embedder, &mut cache, &q.to_string(), 0.75, 10, true, None).unwrap();
+            let results = warp::search(
+                &db,
+                &embedder,
+                &mut cache,
+                &q.to_string(),
+                0.75,
+                10,
+                true,
+                None,
+            )
+            .unwrap();
             for (_score, _metadata, _body, body_idx) in results {
                 assert!(body_idx == pos);
             }
@@ -163,20 +203,21 @@ mod tests {
             "You can hear a blue whale's heartbeat from over 2 miles away.",
             "Butterflies can taste with their feet.",
             "A day on Earth was once only 6 hours long in the distant past.",
-            ];
+        ];
         let sentences = sentences.map(|s| s.to_string());
 
         let query = "what wash the shortest war ever?";
         for _ in 0..2 {
             let scores =
-                warp::score_query_sentences(&embedder, &mut cache, &query.to_string(), &sentences).unwrap();
+                warp::score_query_sentences(&embedder, &mut cache, &query.to_string(), &sentences)
+                    .unwrap();
             let mut max = -1.0f32;
             let mut i_max = 0usize;
             for (i, score) in scores.iter().enumerate() {
                 println!("score {score}");
                 if *score > max {
                     max = *score;
-                    i_max = i ;
+                    i_max = i;
                 }
             }
             assert!(i_max == 3);
@@ -230,4 +271,3 @@ mod tests {
         Ok(())
     }
 }
-

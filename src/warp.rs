@@ -231,11 +231,13 @@ fn write_buckets(db: &DB, centers: &Tensor, device: &Device) -> Result<()> {
 
                 for (i, count) in counts
                     .split(',')
-                    .filter_map(|s| s.parse::<u32>().ok()).enumerate() {
-                        for _ in 0..count {
-                            document_indices.push((id, i as u32));
-                        }
+                    .filter_map(|s| s.parse::<u32>().ok())
+                    .enumerate()
+                {
+                    for _ in 0..count {
+                        document_indices.push((id, i as u32));
                     }
+                }
                 all_chunkids.push(chunkid);
                 all_embeddings.extend(split);
                 batch += m;
@@ -427,7 +429,7 @@ pub fn fulltext_search(
             row.get::<_, u32>(0)?,
             row.get::<_, String>(1)?,
             row.get::<_, String>(2)?,
-            row.get::<_, f32>(3)?
+            row.get::<_, f32>(3)?,
         ))
     })?;
     for result in results {
@@ -777,7 +779,6 @@ pub fn match_centroids(
 
     let scaler = 1.0f32 / n as f32;
     for i in 0.. {
-
         let ((idx, sub_idx), pos) = all[i];
 
         let is_last = i == all.len() - 1;
@@ -802,7 +803,6 @@ pub fn match_centroids(
                 max_sub_score = -1.0f32;
                 i_max_sub_score = 0;
             }
-
         }
 
         if is_last {
@@ -824,7 +824,9 @@ pub fn match_centroids(
     );
 
     let now = std::time::Instant::now();
-    db.execute("CREATE TEMPORARY TABLE temp2(rowid INTEGER PRIMARY KEY, score FLOAT, sub_idx INTEGER)")?;
+    db.execute(
+        "CREATE TEMPORARY TABLE temp2(rowid INTEGER PRIMARY KEY, score FLOAT, sub_idx INTEGER)",
+    )?;
     let mut insert_temp_query = db.query("INSERT INTO temp2 VALUES(?1, ?2, ?3)")?;
 
     for (idx, score, sub_idx) in all_scored.iter() {
@@ -900,7 +902,7 @@ impl<'a> Gatherer<'a> {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?
+                    row.get::<_, String>(2)?,
                 ))
             })
             .unwrap()
@@ -951,10 +953,9 @@ impl<'a> Iterator for Gatherer<'a> {
                 let mut count: u32 = 0;
                 let mut done = false;
                 let mut flush = false;
-                let mut counts = vec!();
+                let mut counts = vec![];
 
                 while !done {
-
                     let o = if i < offsets.len() {
                         offsets[i].1
                     } else {
@@ -982,7 +983,6 @@ impl<'a> Iterator for Gatherer<'a> {
                         count = 0;
                         flush = false;
                     }
-
                 }
                 assert!(count == 0);
                 assert!(counts.iter().sum::<u32>() == offsets.len() as u32);
@@ -1201,15 +1201,12 @@ pub fn search(
             None => 0.0f32,
         };
         let (metadata, body) = body_query.query_row((idx,), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-            ))
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
 
         let body_idx = match offsets.get(&idx) {
             Some(offset) => *offset,
-            None => 0u32
+            None => 0u32,
         };
         results.push((score, metadata, body, body_idx));
     }
@@ -1235,9 +1232,7 @@ pub fn score_query_sentences(
 ) -> Result<Vec<f32>> {
     let now = std::time::Instant::now();
     let qe = match cache.get(&q) {
-        Some(existing) => {
-            existing
-        }
+        Some(existing) => existing,
         None => {
             let (qe, _offsets) = embedder.embed(&q)?;
             let qe = qe.get(0)?;

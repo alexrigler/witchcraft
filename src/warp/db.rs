@@ -2,8 +2,8 @@ use iso8601_timestamp::Timestamp;
 use log::{error, warn};
 use rusqlite::{Connection, OpenFlags, Result as SQLResult, Statement};
 use sha2::{Digest, Sha256};
-use uuid::Uuid;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 const HASH_CHARS: usize = 32; // we'll use sha256 truncated at 128 bits/32 characters
 
@@ -15,14 +15,14 @@ pub struct DB {
 
 impl DB {
     pub fn new_reader(db_fn: PathBuf) -> SQLResult<Self> {
-        let connection = Connection::open_with_flags(db_fn.clone(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let connection =
+            Connection::open_with_flags(db_fn.clone(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         Ok(Self {
             db_fn: db_fn,
             connection: connection,
             remove_on_shutdown: false,
         })
     }
-
 
     pub fn new(db_fn: PathBuf) -> SQLResult<Self> {
         const APP_ID: i32 = 0x07DB_DA55;
@@ -41,7 +41,8 @@ impl DB {
         let schema_ok = if first_creation {
             true
         } else {
-            let app_id: SQLResult<i32> = connection.query_row("PRAGMA application_id;", [], |r| r.get(0));
+            let app_id: SQLResult<i32> =
+                connection.query_row("PRAGMA application_id;", [], |r| r.get(0));
             let user_version: SQLResult<i32> =
                 connection.query_row("PRAGMA user_version;", [], |r| r.get(0));
             matches!((app_id, user_version),
@@ -52,7 +53,10 @@ impl DB {
         let connection = if db_ok && schema_ok {
             connection
         } else {
-            warn!("warp database {} corrupted or schema mismatch, recreating it!", db_fn.display());
+            warn!(
+                "warp database {} corrupted or schema mismatch, recreating it!",
+                db_fn.display()
+            );
             connection.close().map_err(|(_conn, e)| e)?;
             std::fs::remove_file(&db_fn)
                 .map_err(|_e| rusqlite::Error::InvalidPath(db_fn.clone()))?;
@@ -64,7 +68,9 @@ impl DB {
         };
 
         if first_creation {
-            connection.execute_batch(&format!("PRAGMA application_id = {APP_ID}; PRAGMA user_version = {EXPECTED_VERSION}"))?;
+            connection.execute_batch(&format!(
+                "PRAGMA application_id = {APP_ID}; PRAGMA user_version = {EXPECTED_VERSION}"
+            ))?;
         }
 
         //connection
@@ -214,10 +220,9 @@ impl DB {
         body: &str,
         lens: Option<Vec<usize>>,
     ) -> SQLResult<()> {
-
         let lens = match lens {
             Some(lens) => lens,
-            None => [body.chars().count()].to_vec()
+            None => [body.chars().count()].to_vec(),
         };
 
         let total: usize = lens.iter().copied().sum();
@@ -243,7 +248,14 @@ impl DB {
             "INSERT INTO document VALUES(?1, ?2, ?3, ?4, ?5, ?6)
             ON CONFLICT(uuid) DO UPDATE SET
                 date = ?2, metadata = ?3, hash = ?4, body = ?5, lens = ?6",
-            (&uuid.to_string(), date.to_string(), metadata, &hash, &body, &lens),
+            (
+                &uuid.to_string(),
+                date.to_string(),
+                metadata,
+                &hash,
+                &body,
+                &lens,
+            ),
         )?;
         self.remove_on_shutdown = false;
         Ok(())
