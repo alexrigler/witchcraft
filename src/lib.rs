@@ -290,7 +290,7 @@ impl Indexer {
                                     }
                                 };
                             }
-                            if warp::count_unindexed_embeddings(&db).unwrap_or(0) > 2048 {
+                            if warp::count_unindexed_embeddings(&db).unwrap_or(0) > 1024 {
                                 let now = std::time::Instant::now();
                                 match warp::index_chunks(&db, &device) {
                                     Ok(()) => {}
