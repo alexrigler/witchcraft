@@ -76,9 +76,8 @@ impl DB {
             ))?;
         }
 
-        //connection
-        //.pragma_update(None, "journal_mode", &"WAL")
-        //?;
+        // Enable WAL mode for better concurrency and performance
+        connection.pragma_update(None, "journal_mode", &"WAL")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
 
         let query = format!(
