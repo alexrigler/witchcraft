@@ -380,7 +380,6 @@ fn merge_and_write_buckets(
     all_chunkids: &[u32],
     centers_cpu: &Tensor,
     id_offset: u32,
-    generation: u32,
 ) -> Result<()> {
     let mut merger = merger::Merger::from_tempfiles(tmpfiles)?;
     for result in &mut merger {
@@ -390,7 +389,6 @@ fn merge_and_write_buckets(
         let compressed_keys = compress_keys(&entry.keys);
         db.add_bucket(
             id_offset + entry.value,
-            generation,
             &center_bytes,
             &compressed_keys,
             &entry.data,
@@ -398,7 +396,7 @@ fn merge_and_write_buckets(
     }
     info!("write {} chunk ids to indexed_chunk", all_chunkids.len());
     for &chunkid in all_chunkids {
-        let _ = db.add_indexed_chunk(chunkid, generation)?;
+        let _ = db.add_indexed_chunk(chunkid)?;
     }
     Ok(())
 }
@@ -620,9 +618,9 @@ pub fn match_centroids(
     top_k: usize,
     sql_filter: Option<&SqlStatementInternal>,
 ) -> Result<Vec<(f32, u32, u32)>> {
-    let max_generation = db
-        .query("SELECT MAX(generation) FROM indexed_chunk")?
-        .query_row((), |row| Ok(row.get::<_, u32>(0)?))
+    let cache_version: u64 = db
+        .query("SELECT IFNULL(MAX(id), 0) + COUNT(*) FROM bucket")?
+        .query_row((), |row| Ok(row.get::<_, u64>(0)?))
         .unwrap_or(0);
     let mut bucket_query =
         db.query("SELECT indices,residuals FROM bucket WHERE id = ?1")?;
@@ -638,7 +636,7 @@ pub fn match_centroids(
     let mut missing = vec![];
 
     let (cluster_ids, sizes, centers, centers_matrix) =
-        get_centers(&db, &device, max_generation as u64)?;
+        get_centers(&db, &device, cache_version)?;
 
     if centers.len() > 0 {
         let now = std::time::Instant::now();
@@ -1172,9 +1170,9 @@ fn count_indexed_embeddings(db: &DB) -> Result<usize> {
     Ok(count)
 }
 
-fn count_generations(db: &DB) -> Result<usize> {
+fn count_buckets(db: &DB) -> Result<usize> {
     let count: usize = db
-        .query("SELECT COUNT(DISTINCT generation) FROM bucket")?
+        .query("SELECT COUNT(*) FROM bucket")?
         .query_row((), |row| Ok(row.get::<_, usize>(0)?))?;
     Ok(count)
 }
@@ -1236,20 +1234,9 @@ fn full_index(db: &DB, device: &Device) -> Result<()> {
 
     let txstatus = match db.begin_transaction() {
         Ok(()) => {
-            let max_generation = db
-                .query("SELECT max(generation) FROM indexed_chunk")?
-                .query_row((), |row| Ok(row.get::<_, u32>(0)?))
-                .unwrap_or(0);
-            let next_generation = max_generation + 1;
-
-            merge_and_write_buckets(
-                db, tmpfiles, &all_chunkids, &centers_cpu, 0, next_generation,
-            )?;
-
-            db.query("DELETE FROM bucket WHERE generation <= ?1")?
-                .execute((max_generation,))?;
-            db.query("DELETE FROM indexed_chunk WHERE generation <= ?1")?
-                .execute((max_generation,))?;
+            db.execute("DELETE FROM bucket")?;
+            db.execute("DELETE FROM indexed_chunk")?;
+            merge_and_write_buckets(db, tmpfiles, &all_chunkids, &centers_cpu, 0)?;
             Ok(())
         }
         Err(v) => {
@@ -1292,20 +1279,12 @@ fn incremental_index(db: &DB, device: &Device) -> Result<()> {
 
     let txstatus = match db.begin_transaction() {
         Ok(()) => {
-            let max_generation = db
-                .query("SELECT max(generation) FROM indexed_chunk")?
-                .query_row((), |row| Ok(row.get::<_, u32>(0)?))
-                .unwrap_or(0);
-            let next_generation = max_generation + 1;
-
             let max_bucket_id: i64 = db
                 .query("SELECT IFNULL(MAX(id), -1) FROM bucket")?
                 .query_row((), |row| row.get(0))?;
             let id_offset = (max_bucket_id + 1) as u32;
 
-            merge_and_write_buckets(
-                db, tmpfiles, &all_chunkids, &centers_cpu, id_offset, next_generation,
-            )?;
+            merge_and_write_buckets(db, tmpfiles, &all_chunkids, &centers_cpu, id_offset)?;
             Ok(())
         }
         Err(v) => {
@@ -1330,14 +1309,15 @@ pub fn index_chunks(db: &DB, device: &Device) -> Result<()> {
     }
 
     let indexed = count_indexed_embeddings(db)?;
-    let num_generations = count_generations(db)?;
+    let total_buckets = count_buckets(db)?;
+    let expected_k = (16.0 * ((indexed + unindexed) as f64).sqrt()).round() as usize;
 
     info!(
-        "database has {} unindexed embeddings ({} indexed, {} generations)",
-        unindexed, indexed, num_generations
+        "database has {} unindexed embeddings ({} indexed, {} buckets, ~{} expected)",
+        unindexed, indexed, total_buckets, expected_k
     );
 
-    if indexed == 0 || unindexed > indexed / 2 || num_generations >= 10 {
+    if indexed == 0 || unindexed > indexed / 2 || total_buckets > expected_k * 10 {
         full_index(db, device)
     } else {
         incremental_index(db, device)

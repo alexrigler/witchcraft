@@ -33,7 +33,7 @@ impl DB {
 
     pub fn new(db_fn: PathBuf) -> SQLResult<Self> {
         const APP_ID: i32 = 0x07DB_DA55;
-        const EXPECTED_VERSION: i32 = 4;
+        const EXPECTED_VERSION: i32 = 5;
 
         let mut first_creation = !db_fn.exists();
         let connection = Connection::open(&db_fn)?;
@@ -137,17 +137,10 @@ impl DB {
         connection.execute(query, ())?;
 
         let query = "CREATE TABLE IF NOT EXISTS bucket(id INTEGER PRIMARY KEY,
-            generation INTEGER NOT NULL,
             center BLOB NOT NULL, indices BLOB NOT NULL, residuals BLOB NOT NULL)";
         connection.execute(query, ())?;
 
-        let query = "CREATE INDEX IF NOT EXISTS bucket_index ON bucket(generation, id)";
-        connection.execute(query, ())?;
-
-        let query = "CREATE TABLE IF NOT EXISTS indexed_chunk(chunkid INTEGER PRIMARY KEY NOT NULL, generation INTEGER NOT NULL)";
-        connection.execute(query, ())?;
-
-        let query = "CREATE UNIQUE INDEX IF NOT EXISTS indexed_chunk_index ON indexed_chunk(chunkid, generation)";
+        let query = "CREATE TABLE IF NOT EXISTS indexed_chunk(chunkid INTEGER PRIMARY KEY NOT NULL)";
         connection.execute(query, ())?;
         Ok(Self {
             db_fn: db_fn,
@@ -328,22 +321,21 @@ impl DB {
     pub fn add_bucket(
         self: &Self,
         id: u32,
-        generation: u32,
         center: &Vec<u8>,
         indices: &Vec<u8>,
         residuals: &Vec<u8>,
     ) -> SQLResult<()> {
         self.conn().execute(
-            "INSERT OR REPLACE INTO bucket VALUES(?1, ?2, ?3, ?4, ?5)",
-            (id, generation, center, indices, residuals),
+            "INSERT OR REPLACE INTO bucket VALUES(?1, ?2, ?3, ?4)",
+            (id, center, indices, residuals),
         )?;
         Ok(())
     }
 
-    pub fn add_indexed_chunk(self: &Self, chunkid: u32, generation: u32) -> SQLResult<()> {
+    pub fn add_indexed_chunk(self: &Self, chunkid: u32) -> SQLResult<()> {
         self.conn().execute(
-            "INSERT OR REPLACE INTO indexed_chunk VALUES(?1, ?2)",
-            (chunkid, generation),
+            "INSERT OR REPLACE INTO indexed_chunk VALUES(?1)",
+            (chunkid,),
         )?;
         Ok(())
     }
