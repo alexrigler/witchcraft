@@ -192,6 +192,161 @@ mod tests {
     }
 
     #[test]
+    fn test_incremental_index() -> std::io::Result<()> {
+        let dir = tempdir().unwrap();
+        let path: PathBuf = dir.path().join("warp");
+        let mut db = DB::new(path.clone()).unwrap();
+
+        let device = warp::make_device();
+        let assets = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets"));
+        let embedder = warp::Embedder::new(&device, &assets).unwrap();
+        let mut cache = warp::EmbeddingsCache::new(4);
+
+        // Phase 1: Insert initial documents, embed and full-index
+        let mut uuids = vec![];
+        for body in FACTS {
+            let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.as_bytes());
+            uuids.push(uuid.clone());
+            db.add_doc(&uuid, None, &uuid.to_string(), &body, None)
+                .unwrap();
+        }
+        warp::embed_chunks(&db, &embedder, None).unwrap();
+        warp::index_chunks(&db, &device).unwrap();
+
+        // Verify search works after full index
+        let results = warp::search(
+            &db,
+            &embedder,
+            &mut cache,
+            &"A group of flamingos".to_string(),
+            0.75,
+            10,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(results.len() >= 1, "should find flamingo fact after full index");
+
+        // Phase 2: Add a few new documents (small batch triggers incremental)
+        let new_facts = [
+            "The Amazon rainforest produces about 20% of the world's oxygen.",
+            "A teaspoon of neutron star material would weigh about 6 billion tons.",
+            "Dolphins sleep with one eye open.",
+        ];
+        let mut new_uuids = vec![];
+        for body in new_facts {
+            let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.as_bytes());
+            new_uuids.push(uuid.clone());
+            db.add_doc(&uuid, None, &uuid.to_string(), &body, None)
+                .unwrap();
+        }
+        warp::embed_chunks(&db, &embedder, None).unwrap();
+        warp::index_chunks(&db, &device).unwrap(); // should trigger incremental
+
+        // Verify search finds both old and new documents
+        let results = warp::search(
+            &db,
+            &embedder,
+            &mut cache,
+            &"A group of flamingos".to_string(),
+            0.75,
+            10,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(
+            results.len() >= 1,
+            "should still find flamingo fact after incremental index"
+        );
+
+        let results = warp::search(
+            &db,
+            &embedder,
+            &mut cache,
+            &"dolphins sleeping habits".to_string(),
+            0.75,
+            10,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(
+            results.len() >= 1,
+            "should find new dolphin fact after incremental index"
+        );
+
+        // Phase 3: Force compaction by calling full_index again
+        // Add enough data to trigger full re-index (> 50% new)
+        let more_facts = [
+            "The human brain uses about 20% of the body's total energy.",
+            "A group of owls is called a parliament.",
+            "Cats have over 20 vocalizations, including the purr.",
+            "The Great Wall of China is not visible from space with the naked eye.",
+            "Polar bears have black skin underneath their white fur.",
+            "Hummingbirds are the only birds that can fly backwards.",
+            "An octopus has nine brains.",
+            "The largest living organism is a honey fungus in Oregon.",
+            "Seahorses are the only animals where the male gives birth.",
+            "A bolt of lightning contains enough energy to toast 100,000 slices of bread.",
+            "The fingerprints of koalas are virtually indistinguishable from human fingerprints.",
+            "Trees can communicate with each other through underground fungal networks.",
+            "A cockroach can live for a week without its head.",
+            "The tongue of a blue whale weighs as much as an elephant.",
+            "There are more possible iterations of a game of chess than atoms in the known universe.",
+            "Bananas are radioactive due to their potassium content.",
+            "The shortest complete sentence in the English language is 'Go.'",
+            "An ant can carry 50 times its own body weight.",
+            "Venus is the only planet that spins clockwise.",
+            "A flock of crows is known as a murder.",
+        ];
+        for body in more_facts {
+            let uuid = Uuid::new_v5(&Uuid::NAMESPACE_OID, body.as_bytes());
+            db.add_doc(&uuid, None, &uuid.to_string(), &body, None)
+                .unwrap();
+        }
+        warp::embed_chunks(&db, &embedder, None).unwrap();
+        warp::index_chunks(&db, &device).unwrap(); // should trigger full re-index (compaction)
+
+        // Verify search still works after compaction
+        let results = warp::search(
+            &db,
+            &embedder,
+            &mut cache,
+            &"A group of flamingos".to_string(),
+            0.75,
+            10,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(
+            results.len() >= 1,
+            "should still find flamingo fact after compaction"
+        );
+
+        let results = warp::search(
+            &db,
+            &embedder,
+            &mut cache,
+            &"dolphins sleeping habits".to_string(),
+            0.75,
+            10,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(
+            results.len() >= 1,
+            "should still find dolphin fact after compaction"
+        );
+
+        db.clear();
+        db.shutdown();
+        Ok(())
+    }
+
+    #[test]
     fn test_scoring() -> std::io::Result<()> {
         let device = warp::make_device();
         let assets = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/assets"));

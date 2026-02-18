@@ -231,25 +231,23 @@ fn decompress_keys(bytes: &[u8]) -> Result<Vec<(u32, u32)>> {
     Ok(keys)
 }
 
-fn write_buckets(db: &DB, centers: &Tensor, device: &Device) -> Result<()> {
+fn write_buckets(
+    db: &DB,
+    centers: &Tensor,
+    device: &Device,
+    embeddings_sql: &str,
+    expected_count: u64,
+) -> Result<(Vec<tempfile::NamedTempFile>, Vec<u32>, Tensor)> {
     let mut mmuls_total = 0;
     let mut writes_total = 0;
 
-    let embeddings_count = db
-        .query("SELECT sum(length(embeddings)/?1) FROM chunk")?
-        .query_row((EMBEDDING_DIM,), |row| Ok(row.get::<_, u32>(0)?))?;
-    assert!(embeddings_count > 0);
-    let bar = progress::new(embeddings_count as u64);
+    let bar = progress::new(expected_count);
 
     let mut document_indices = Vec::<(u32, u32)>::new();
     let mut all_chunkids = vec![];
     let mut all_embeddings = vec![];
 
-    let mut query = db.query(
-        "SELECT document.rowid,chunk.rowid,chunk.embeddings,chunk.counts FROM document,chunk
-        WHERE document.hash = chunk.hash
-        ORDER BY document.rowid",
-    )?;
+    let mut query = db.query(embeddings_sql)?;
 
     let mut results = query.query_map((), |row| {
         Ok((
@@ -373,52 +371,36 @@ fn write_buckets(db: &DB, centers: &Tensor, device: &Device) -> Result<()> {
     debug!("mmuls took {} ms.", mmuls_total);
     debug!("writes took {} ms.", writes_total);
 
-    let txstatus = match db.begin_transaction() {
-        Ok(()) => {
-            let max_generation = db
-                .query("SELECT max(generation) FROM indexed_chunk")?
-                .query_row((), |row| Ok(row.get::<_, u32>(0)?))
-                .unwrap_or(0);
-            let next_generation = max_generation + 1;
+    Ok((tmpfiles, all_chunkids, centers_cpu))
+}
 
-            let mut merger = merger::Merger::from_tempfiles(tmpfiles)?;
-            for result in &mut merger {
-                let entry = result?;
-                let center = centers_cpu.get(entry.value as usize)?;
-                let center_bytes = center.to_f32_bytes()?;
-                let compressed_keys = compress_keys(&entry.keys);
-                db.add_bucket(
-                    entry.value,
-                    next_generation,
-                    &center_bytes,
-                    &compressed_keys,
-                    &entry.data,
-                )?;
-            }
-            info!("write {} chunk ids to indexed_chunk", all_chunkids.len());
-            for chunkid in all_chunkids {
-                let _ = db.add_indexed_chunk(chunkid, next_generation)?;
-            }
-
-            db.query("DELETE FROM bucket WHERE generation <= ?1")?
-                .execute((max_generation,))?;
-            db.query("DELETE FROM indexed_chunk WHERE generation <= ?1")?
-                .execute((max_generation,))?;
-            Ok(())
-        }
-        Err(v) => {
-            warn!("unable to begin transaction, index not created/updated! {v}");
-            Err(v)
-        }
-    };
-    match txstatus {
-        Ok(()) => Ok(db.commit_transaction()?),
-        Err(v) => {
-            warn!("failure during indexing transaction {v}");
-            let _ = db.rollback_transaction();
-            Err(v.into())
-        }
+fn merge_and_write_buckets(
+    db: &DB,
+    tmpfiles: Vec<tempfile::NamedTempFile>,
+    all_chunkids: &[u32],
+    centers_cpu: &Tensor,
+    id_offset: u32,
+    generation: u32,
+) -> Result<()> {
+    let mut merger = merger::Merger::from_tempfiles(tmpfiles)?;
+    for result in &mut merger {
+        let entry = result?;
+        let center = centers_cpu.get(entry.value as usize)?;
+        let center_bytes = center.to_f32_bytes()?;
+        let compressed_keys = compress_keys(&entry.keys);
+        db.add_bucket(
+            id_offset + entry.value,
+            generation,
+            &center_bytes,
+            &compressed_keys,
+            &entry.data,
+        )?;
     }
+    info!("write {} chunk ids to indexed_chunk", all_chunkids.len());
+    for &chunkid in all_chunkids {
+        let _ = db.add_indexed_chunk(chunkid, generation)?;
+    }
+    Ok(())
 }
 
 pub fn fulltext_search(
@@ -569,7 +551,7 @@ fn get_centers(
     }
 
     let mut center_query =
-        db.query("SELECT id,length(indices)/4,center FROM bucket ORDER BY id")?;
+        db.query("SELECT id,length(residuals)/64,center FROM bucket ORDER BY id")?;
     let mut cluster_ids = vec![];
     let mut sizes = vec![];
     let mut centers = vec![];
@@ -643,7 +625,7 @@ pub fn match_centroids(
         .query_row((), |row| Ok(row.get::<_, u32>(0)?))
         .unwrap_or(0);
     let mut bucket_query =
-        db.query("SELECT indices,residuals FROM bucket WHERE generation = ?1 and id = ?2")?;
+        db.query("SELECT indices,residuals FROM bucket WHERE id = ?1")?;
 
     let k = 32;
     let t_prime = 40000;
@@ -705,7 +687,7 @@ pub fn match_centroids(
 
         for i in topk_clusters {
             let (keys_compressed, document_embeddings) = bucket_query
-                .query_row((max_generation, cluster_ids[i as usize]), |row| {
+                .query_row((cluster_ids[i as usize],), |row| {
                     Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, Vec<u8>>(1)?))
                 })?;
 
@@ -765,12 +747,11 @@ pub fn match_centroids(
           SELECT 1
           FROM indexed_chunk AS i
           WHERE i.chunkid = c.rowid
-            AND i.generation = ?1
         )
         ORDER BY d.rowid",
     )?;
 
-    let results = unindexed_chunks_query.query_map((max_generation,), |row| {
+    let results = unindexed_chunks_query.query_map((), |row| {
         Ok((row.get::<_, u32>(0)?, row.get::<_, Vec<u8>>(1)?))
     })?;
     for result in results {
@@ -1177,7 +1158,6 @@ pub fn count_unindexed_embeddings(db: &DB) -> Result<usize> {
         FROM chunk AS c
         LEFT JOIN indexed_chunk AS i
         ON i.chunkid = c.rowid
-        AND i.generation = (SELECT MAX(generation) FROM indexed_chunk)
         WHERE i.chunkid IS NULL"
     ))?;
 
@@ -1185,18 +1165,29 @@ pub fn count_unindexed_embeddings(db: &DB) -> Result<usize> {
     Ok(count)
 }
 
-pub fn index_chunks(db: &DB, device: &Device) -> Result<()> {
-    let unindexed = count_unindexed_embeddings(&db)?;
-    info!(
-        "database has {} unindexed embeddings, reindexing...",
-        unindexed
-    );
+fn count_indexed_embeddings(db: &DB) -> Result<usize> {
+    let count: usize = db
+        .query("SELECT IFNULL(SUM(length(residuals)/64), 0) FROM bucket")?
+        .query_row((), |row| Ok(row.get::<_, usize>(0)?))?;
+    Ok(count)
+}
 
-    let mut kmeans_query = db.query("SELECT chunk.embeddings FROM chunk")?;
+fn count_generations(db: &DB) -> Result<usize> {
+    let count: usize = db
+        .query("SELECT COUNT(DISTINCT generation) FROM bucket")?
+        .query_row((), |row| Ok(row.get::<_, usize>(0)?))?;
+    Ok(count)
+}
+
+fn sample_embeddings_for_kmeans(
+    db: &DB,
+    sql: &str,
+    device: &Device,
+) -> Result<(Tensor, usize)> {
+    let mut kmeans_query = db.query(sql)?;
     let mut total_embeddings = 0;
     let mut rng = rand::rng();
     let mut all_embeddings = vec![];
-    debug!("read embeddings...");
     for embeddings in kmeans_query.query_map((), |row| Ok(row.get::<_, Vec<u8>>(0)?))? {
         let t = Tensor::embeddings_from_packed(&embeddings?, EMBEDDING_DIM, &Device::Cpu)?;
         let (m, _) = t.dims2()?;
@@ -1208,29 +1199,149 @@ pub fn index_chunks(db: &DB, device: &Device) -> Result<()> {
         }
         total_embeddings += m;
     }
-    let matrix = Tensor::stack(&all_embeddings, 0)?.to_device(&device)?;
+    let matrix = Tensor::stack(&all_embeddings, 0)?.to_device(device)?;
+    Ok((matrix, total_embeddings))
+}
 
+fn run_kmeans_for_index(matrix: &Tensor, total_embeddings: usize) -> Result<Tensor> {
     let now = std::time::Instant::now();
-    let log2_k = (16.0 * (total_embeddings as f64).sqrt()).log(2.0).floor() as u32;
-    let mut k = 1 << log2_k;
+    let mut k = (16.0 * (total_embeddings as f64).sqrt()).round() as usize;
+    k = k.max(1);
     debug!("total_embeddings={} k={}", total_embeddings, k);
     let (m, _) = matrix.dims2()?;
     if m < k {
         k = m / 4;
     }
-    let centers = kmeans(&matrix, k as usize, 5, &Device::Cpu)?;
+    let centers = kmeans(matrix, k, 5, &Device::Cpu)?;
     debug!("kmeans took {} ms.", now.elapsed().as_millis());
+    Ok(centers)
+}
 
-    debug!("write buckets...");
+fn full_index(db: &DB, device: &Device) -> Result<()> {
+    debug!("read all embeddings for full index...");
+    let (matrix, total_embeddings) =
+        sample_embeddings_for_kmeans(db, "SELECT chunk.embeddings FROM chunk", device)?;
+
+    let centers = run_kmeans_for_index(&matrix, total_embeddings)?;
+
+    debug!("write buckets (full)...");
     let now = std::time::Instant::now();
-    match write_buckets(&db, &centers, &device) {
-        Ok(()) => {}
+    let embeddings_sql =
+        "SELECT document.rowid,chunk.rowid,chunk.embeddings,chunk.counts FROM document,chunk
+        WHERE document.hash = chunk.hash
+        ORDER BY document.rowid";
+    let (tmpfiles, all_chunkids, centers_cpu) =
+        write_buckets(db, &centers, device, embeddings_sql, total_embeddings as u64)?;
+    info!("write buckets (full) took {} ms.", now.elapsed().as_millis());
+
+    let txstatus = match db.begin_transaction() {
+        Ok(()) => {
+            let max_generation = db
+                .query("SELECT max(generation) FROM indexed_chunk")?
+                .query_row((), |row| Ok(row.get::<_, u32>(0)?))
+                .unwrap_or(0);
+            let next_generation = max_generation + 1;
+
+            merge_and_write_buckets(
+                db, tmpfiles, &all_chunkids, &centers_cpu, 0, next_generation,
+            )?;
+
+            db.query("DELETE FROM bucket WHERE generation <= ?1")?
+                .execute((max_generation,))?;
+            db.query("DELETE FROM indexed_chunk WHERE generation <= ?1")?
+                .execute((max_generation,))?;
+            Ok(())
+        }
         Err(v) => {
-            info!("write buckets failed {}", v);
+            warn!("unable to begin transaction, index not created/updated! {v}");
+            Err(v)
+        }
+    };
+    match txstatus {
+        Ok(()) => Ok(db.commit_transaction()?),
+        Err(v) => {
+            warn!("failure during indexing transaction {v}");
+            let _ = db.rollback_transaction();
+            Err(v.into())
         }
     }
-    info!("write buckets took {} ms.", now.elapsed().as_millis());
-    Ok(())
+}
+
+fn incremental_index(db: &DB, device: &Device) -> Result<()> {
+    debug!("read unindexed embeddings for incremental index...");
+    let kmeans_sql =
+        "SELECT c.embeddings FROM chunk AS c
+        WHERE NOT EXISTS (SELECT 1 FROM indexed_chunk AS i WHERE i.chunkid = c.rowid)";
+    let (matrix, total_embeddings) = sample_embeddings_for_kmeans(db, kmeans_sql, device)?;
+
+    let centers = run_kmeans_for_index(&matrix, total_embeddings)?;
+
+    debug!("write buckets (incremental)...");
+    let now = std::time::Instant::now();
+    let embeddings_sql =
+        "SELECT document.rowid,chunk.rowid,chunk.embeddings,chunk.counts FROM document,chunk
+        WHERE document.hash = chunk.hash
+        AND NOT EXISTS (SELECT 1 FROM indexed_chunk WHERE chunkid = chunk.rowid)
+        ORDER BY document.rowid";
+    let (tmpfiles, all_chunkids, centers_cpu) =
+        write_buckets(db, &centers, device, embeddings_sql, total_embeddings as u64)?;
+    info!(
+        "write buckets (incremental) took {} ms.",
+        now.elapsed().as_millis()
+    );
+
+    let txstatus = match db.begin_transaction() {
+        Ok(()) => {
+            let max_generation = db
+                .query("SELECT max(generation) FROM indexed_chunk")?
+                .query_row((), |row| Ok(row.get::<_, u32>(0)?))
+                .unwrap_or(0);
+            let next_generation = max_generation + 1;
+
+            let max_bucket_id: i64 = db
+                .query("SELECT IFNULL(MAX(id), -1) FROM bucket")?
+                .query_row((), |row| row.get(0))?;
+            let id_offset = (max_bucket_id + 1) as u32;
+
+            merge_and_write_buckets(
+                db, tmpfiles, &all_chunkids, &centers_cpu, id_offset, next_generation,
+            )?;
+            Ok(())
+        }
+        Err(v) => {
+            warn!("unable to begin transaction, index not created/updated! {v}");
+            Err(v)
+        }
+    };
+    match txstatus {
+        Ok(()) => Ok(db.commit_transaction()?),
+        Err(v) => {
+            warn!("failure during indexing transaction {v}");
+            let _ = db.rollback_transaction();
+            Err(v.into())
+        }
+    }
+}
+
+pub fn index_chunks(db: &DB, device: &Device) -> Result<()> {
+    let unindexed = count_unindexed_embeddings(db)?;
+    if unindexed == 0 {
+        return Ok(());
+    }
+
+    let indexed = count_indexed_embeddings(db)?;
+    let num_generations = count_generations(db)?;
+
+    info!(
+        "database has {} unindexed embeddings ({} indexed, {} generations)",
+        unindexed, indexed, num_generations
+    );
+
+    if indexed == 0 || unindexed > indexed / 2 || num_generations >= 10 {
+        full_index(db, device)
+    } else {
+        incremental_index(db, device)
+    }
 }
 
 use lru::LruCache;
