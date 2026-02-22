@@ -789,8 +789,14 @@ pub fn match_centroids(
         return Ok(vec![]);
     }
 
+    let now = std::time::Instant::now();
     let all_document_embeddings = Tensor::cat(&all_document_embeddings, 0)?;
     let all_document_embeddings = all_document_embeddings.to_device(query_embeddings.device())?;
+    debug!(
+        "concatenating and moving {} embedding chunks took {} ms.",
+        all_document_embeddings.dims2()?.0,
+        now.elapsed().as_millis()
+    );
 
     let now = std::time::Instant::now();
     let sim = query_embeddings
@@ -876,6 +882,7 @@ pub fn match_centroids(
     );
 
     let now = std::time::Instant::now();
+    let temp_table_start = std::time::Instant::now();
     db.execute(
         "CREATE TEMPORARY TABLE temp2(rowid INTEGER PRIMARY KEY, score FLOAT, sub_idx INTEGER)",
     )?;
@@ -884,6 +891,11 @@ pub fn match_centroids(
     for (idx, score, sub_idx) in all_scored.iter() {
         let _ = insert_temp_query.execute((idx, score, sub_idx));
     }
+    debug!(
+        "creating temp table and inserting {} rows took {} ms",
+        all_scored.len(),
+        temp_table_start.elapsed().as_millis()
+    );
 
     let (filter_sql, filter_params) = build_filter_sql_and_params(sql_filter)?;
     let filter_clause = if !filter_sql.is_empty() {
@@ -901,6 +913,7 @@ pub fn match_centroids(
         LIMIT ?",
     );
 
+    let query_start = std::time::Instant::now();
     let results_status: Result<Vec<(f32, u32, u32)>> = {
         let mut scored_documents_query = db.query(&sql)?;
 
@@ -921,6 +934,7 @@ pub fn match_centroids(
             .collect::<Result<Vec<_>, _>>()?;
         Ok(results)
     };
+    debug!("querying temp table took {} ms", query_start.elapsed().as_millis());
 
     db.execute("DROP TABLE temp2")?;
 
@@ -933,7 +947,7 @@ pub fn match_centroids(
     };
 
     debug!(
-        "reading scored and filtered document ids from DB took {} ms",
+        "DB operations took {} ms total",
         now.elapsed().as_millis()
     );
     Ok(results)

@@ -105,11 +105,15 @@ pub fn bulk_search(
 
         info!("searching for: {}", question);
         let now = std::time::Instant::now();
+        let fts_start = std::time::Instant::now();
         let fts_matches = if use_fulltext {
             warp::fulltext_search(&db, &question, top_k, None)?
         } else {
             vec![]
         };
+        if use_fulltext {
+            debug!("fulltext search took {} ms.", fts_start.elapsed().as_millis());
+        }
 
         let sem_matches = if use_semantic {
             let now = std::time::Instant::now();
@@ -117,11 +121,17 @@ pub fn bulk_search(
             let qe = qe.get(0)?;
             let embedder_latency_ms = now.elapsed().as_millis() as u32;
             embedder_histogram.record(embedder_latency_ms);
-            warp::match_centroids(&db, &qe, 0.0, top_k, None).unwrap()
+
+            let match_start = std::time::Instant::now();
+            let matches = warp::match_centroids(&db, &qe, 0.0, top_k, None).unwrap();
+            debug!("match_centroids call took {} ms.", match_start.elapsed().as_millis());
+            matches
         } else {
             vec![]
         };
         let sem_idxs: Vec<u32> = sem_matches.iter().map(|&(_, idx, _)| idx).collect();
+
+        let fusion_start = std::time::Instant::now();
         let mut fused = if use_fulltext {
             let fts_idxs: Vec<u32> = fts_matches.iter().map(|&(_, idx, _)| idx).collect();
             warp::reciprocal_rank_fusion(&fts_idxs, &sem_idxs, 60.0)
@@ -129,12 +139,15 @@ pub fn bulk_search(
             sem_idxs
         };
         fused.truncate(top_k);
+        debug!("rank fusion took {} ms.", fusion_start.elapsed().as_millis());
 
+        let metadata_start = std::time::Instant::now();
         let mut metadatas = vec![];
         for idx in fused {
             let metadata = metadata_query.query_row((idx,), |row| Ok(row.get::<_, String>(0)?))?;
             metadatas.push(metadata);
         }
+        debug!("fetching {} metadata took {} ms.", metadatas.len(), metadata_start.elapsed().as_millis());
         let total_ms = now.elapsed().as_millis();
         histogram.record(total_ms.try_into().unwrap());
         debug!("search took {} ms in total", now.elapsed().as_millis());
