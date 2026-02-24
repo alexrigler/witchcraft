@@ -74,7 +74,7 @@ pub fn make_device() -> Device {
     }
 }
 
-#[cfg(feature = "progress")]
+#[cfg(all(feature = "progress", not(feature = "napi")))]
 pub mod progress {
     use indicatif::ProgressBar;
     pub struct Bar(pub ProgressBar);
@@ -92,7 +92,36 @@ pub mod progress {
     }
 }
 
-#[cfg(not(feature = "progress"))]
+#[cfg(feature = "napi")]
+pub mod progress {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    pub struct Bar {
+        total: u64,
+        current: AtomicU64,
+    }
+    pub fn new(len: u64) -> Bar {
+        Bar {
+            total: len,
+            current: AtomicU64::new(0),
+        }
+    }
+    impl Bar {
+        pub fn inc(&self, n: u64) {
+            let current = self.current.fetch_add(n, Ordering::Relaxed) + n;
+            if self.total > 0 {
+                let progress = (current as f64) / (self.total as f64);
+                #[cfg(feature = "napi")]
+                crate::napi::progress_update(progress.min(1.0));
+            }
+        }
+        pub fn finish(&self) {
+            #[cfg(feature = "napi")]
+            crate::napi::progress_update(1.0);
+        }
+    }
+}
+
+#[cfg(not(any(feature = "progress", feature = "napi")))]
 pub mod progress {
     #[derive(Clone, Copy)]
     pub struct Bar;

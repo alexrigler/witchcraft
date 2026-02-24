@@ -168,6 +168,39 @@ pub fn stats(name: &str, number: f64) {
     }
 }
 
+// Store the threadsafe function for progress updates
+static PROGRESSFN: OnceCell<Box<dyn Fn(f64) + Send + Sync>> = OnceCell::new();
+
+#[napi]
+pub fn set_progress_callback(callback: Function<(f64,), Unknown>) -> Result<()> {
+    use napi::threadsafe_function::ThreadsafeFunctionCallMode;
+
+    // Safety: We're intentionally leaking the callback reference to make it 'static
+    // This is okay because we only set the callback once and it lives for the duration of the program
+    let callback_static: Function<'static, (f64,), Unknown> =
+        unsafe { std::mem::transmute(callback) };
+
+    let tsfn = callback_static.build_threadsafe_function().build_callback(
+        |ctx: ThreadsafeCallContext<(f64,)>| {
+            // Pass the progress value (0.0 to 1.0)
+            Ok(ctx.value.0)
+        },
+    )?;
+
+    // Wrap the threadsafe function in a closure that we can store
+    let _ = PROGRESSFN.set(Box::new(move |progress: f64| {
+        let _ = tsfn.call((progress,), ThreadsafeFunctionCallMode::NonBlocking);
+    }));
+
+    Ok(())
+}
+
+pub fn progress_update(progress: f64) {
+    if let Some(callback) = PROGRESSFN.get() {
+        callback(progress);
+    }
+}
+
 enum Job {
     Add {
         uuid: Uuid,
