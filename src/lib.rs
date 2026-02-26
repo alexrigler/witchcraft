@@ -178,26 +178,28 @@ fn matmul_argmax_batched(t: &Tensor, centers_t: &Tensor, batch_size: usize) -> R
     Ok(Tensor::from_vec(assignments, m, device)?)
 }
 
-fn kmeans(data: &Tensor, k: usize, max_iter: usize, device: &Device) -> Result<Tensor> {
+fn kmeans(data: &Tensor, k: usize, max_iter: usize) -> Result<Tensor> {
     let (m, n) = data.dims2()?;
     debug!("kmeans k={} m={} n={}...", k, m, n);
 
     let total: u64 = (max_iter * k).try_into()?;
     let bar = progress::new_with_label(total, "kmeans");
+    let device = data.device();
 
     let mut rng = rand::rng();
     let centroid_idx = rand::seq::index::sample(&mut rng, m, k).into_vec();
     let centroid_idx: Vec<u32> = centroid_idx.iter().map(|&i| i as u32).collect();
 
-    let centroid_idx_tensor = Tensor::from_slice(centroid_idx.as_slice(), (k,), device)?;
-    let centroid_idx_tensor = centroid_idx_tensor.to_device(data.device())?;
+    let centroid_idx_tensor = Tensor::from_slice(centroid_idx.as_slice(), (k,), &device)?;
+    //let centroid_idx_tensor = centroid_idx_tensor.to_device(device)?;
     let mut centers = data.index_select(&centroid_idx_tensor, 0)?;
 
     // Pull data out once; kmeans always runs on CPU.
     let data_flat = data.flatten_all()?.to_vec1::<f32>()?;
 
     for _ in 0..max_iter {
-        let cluster_assignments = matmul_argmax_batched(&data, &centers.transpose(D::Minus1, D::Minus2)?, 1024)?;
+        let centers_t = centers.transpose(D::Minus1, D::Minus2)?;
+        let cluster_assignments = matmul_argmax_batched(&data, &centers_t, 1024)?;
         let assignments = cluster_assignments.to_vec1::<u32>()?;
 
         // Single O(m × n) pass: accumulate per-cluster sums directly into a
@@ -1366,7 +1368,7 @@ fn run_kmeans_for_index(matrix: &Tensor, total_embeddings: usize) -> Result<Tens
     if m < k {
         k = m / 4;
     }
-    let centers = kmeans(matrix, k, 5, &Device::Cpu)?;
+    let centers = kmeans(matrix, k, 5)?;
     debug!("kmeans took {} ms.", now.elapsed().as_millis());
     Ok(centers)
 }
