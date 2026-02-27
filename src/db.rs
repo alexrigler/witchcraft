@@ -33,7 +33,7 @@ impl DB {
 
     pub fn new(db_fn: PathBuf) -> SQLResult<Self> {
         const APP_ID: i32 = 0x07DB_DA55;
-        const EXPECTED_VERSION: i32 = 5;
+        const EXPECTED_VERSION: i32 = 6;
 
         let mut first_creation = !db_fn.exists();
         let connection = Connection::open(&db_fn)?;

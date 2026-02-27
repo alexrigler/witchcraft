@@ -177,7 +177,7 @@ impl TensorPackOps for Tensor {
         assert!(cols <= 255, "column count must fit in u8");
 
         let mut bytes = Vec::with_capacity(rows * cols);
-        bytes.extend_from_slice(&(rows as u16).to_ne_bytes());
+        bytes.extend_from_slice(&(rows as u32).to_ne_bytes());
 
         let all_data = self.flatten_all()?.to_vec1::<f32>()?;
 
@@ -306,8 +306,8 @@ impl TensorPackOps for Tensor {
     fn embeddings_from_packed(bytes: &[u8], cols: usize, device: &Device) -> Result<Tensor> {
         let scale = 1.0 / RANGE;
 
-        let (head, mut bytes) = bytes.split_at(2);
-        let rows = u16::from_ne_bytes(head.try_into().unwrap()) as usize;
+        let (head, mut bytes) = bytes.split_at(4);
+        let rows = u32::from_ne_bytes(head.try_into().unwrap()) as usize;
 
         let mut data = Vec::with_capacity(rows * cols);
 
@@ -419,7 +419,7 @@ impl TensorPackOps for Tensor {
 
             bytes = tail;
         }
-        assert!(bytes.len() == 0);
+        anyhow::ensure!(bytes.len() == 0, "leftover {} bytes after decoding {} rows x {} cols", bytes.len(), rows, cols);
 
         // L2 normalize all rows
         for r in 0..rows {
