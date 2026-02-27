@@ -16,6 +16,9 @@ tokenizers = "*"
 anyhow = "*"
 serde = { version = "*", features = ["derive"] }
 serde_json = "*"
+burn = { version = "0.16", default-features = false, optional = true }
+burn-ndarray = { version = "0.16", features = ["std"], optional = true }
+safetensors = { version = "0.4", optional = true }
 zstd = "0.13.3"
 tempfile = "3.20.0"
 
@@ -26,4 +29,5 @@ libc = { version = "0.2.147", optional = true }
 [features]
 default = ["ov"]
 ov = ["dep:openvino"]
+burn-bench = ["dep:burn", "dep:burn-ndarray", "dep:safetensors"]
 accelerate = ["dep:libc", "dep:accelerate-src", "candle-core/accelerate"]

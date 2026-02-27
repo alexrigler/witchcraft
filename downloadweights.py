@@ -98,6 +98,9 @@ xtr = XTR()
 fp16_state_dict = {k: v.half().cpu() for k, v in xtr.state_dict().items()}
 save_file(fp16_state_dict, "xtr.safetensors")
 
+f32_state_dict = {k: v.float().cpu() for k, v in xtr.state_dict().items()}
+save_file(f32_state_dict, "assets/xtr-f32.safetensors")
+
 compress_file("xtr-base-en/config.json", "assets/config.json.zst")
 compress_file("xtr-base-en/tokenizer.json", "assets/tokenizer.json.zst")
 

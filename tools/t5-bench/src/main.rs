@@ -1,4 +1,6 @@
 mod quantized_t5;
+#[cfg(feature = "burn-bench")]
+mod burn_t5;
 
 use anyhow::Result;
 use candle_core::{Device, Tensor};
@@ -162,6 +164,105 @@ fn bench_openvino(assets: &PathBuf, tokenizer: &tokenizers::Tokenizer, sizes: &[
     Ok(())
 }
 
+#[cfg(feature = "burn-bench")]
+fn bench_burn(assets: &PathBuf, tokenizer: &tokenizers::Tokenizer, sizes: &[usize]) -> Result<()> {
+    let safetensors_path = assets.join("xtr-f32.safetensors");
+
+    let t0 = Instant::now();
+    let model = burn_t5::BurnT5Encoder::load(&safetensors_path);
+    eprintln!("burn: model loaded in {:.0?}", t0.elapsed());
+
+    let base = "Bananas are berries but strawberries are not. Octopuses have three hearts and blue blood. A day on Venus is longer than a year on Venus. There are more trees on Earth than stars in the Milky Way.";
+
+    // Warmup
+    let ids = make_input(tokenizer, base, 32);
+    let _ = model.forward(&ids);
+
+    for &n in sizes {
+        let ids = make_input(tokenizer, base, n);
+
+        // Warmup this size
+        let _ = model.forward(&ids);
+
+        let mut times = Vec::new();
+        for _ in 0..7 {
+            let t = Instant::now();
+            let out = model.forward(&ids);
+            let _shape = out.dims();
+            times.push(t.elapsed());
+        }
+        times.sort();
+        let median = times[3];
+        eprintln!(
+            "burn:     {:>4} tokens -> median {:>7.1?}  ({:.0} tok/s)",
+            n, median, n as f64 / median.as_secs_f64()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "burn-bench")]
+fn validate(assets: &PathBuf, tokenizer: &tokenizers::Tokenizer) -> Result<()> {
+    let device = Device::Cpu;
+    let base = "Bananas are berries but strawberries are not.";
+    let ids = make_input(tokenizer, base, 32);
+
+    // Candle (Q4K dequantized to F32)
+    let compressed = std::fs::read(assets.join("config.json.zst"))?;
+    let cfg_bytes = zstd::stream::decode_all(std::io::Cursor::new(compressed))?;
+    let config: quantized_t5::Config = serde_json::from_slice(&cfg_bytes)?;
+    let compressed = std::fs::read(assets.join("xtr.gguf.zst"))?;
+    let model_bytes = zstd::stream::decode_all(std::io::Cursor::new(compressed))?;
+    let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf_buffer(
+        &model_bytes, &device,
+    )?;
+    let candle_model = quantized_t5::T5EncoderModel::load(vb, &config)?;
+    let candle_input = Tensor::new(&ids[..], &device)?.unsqueeze(0)?;
+    let candle_out = candle_model.forward(&candle_input)?;
+    let candle_data: Vec<f32> = candle_out.flatten_all()?.to_vec1()?;
+
+    // Print token IDs for cross-checking with PyTorch
+    eprintln!("token ids: {:?}", &ids);
+
+    // Burn (F32)
+    let burn_model = burn_t5::BurnT5Encoder::load(&assets.join("xtr-f32.safetensors"));
+    let burn_out = burn_model.forward(&ids);
+    let burn_data: Vec<f32> = burn_out.into_data().to_vec().unwrap();
+
+    assert_eq!(candle_data.len(), burn_data.len(),
+        "output size mismatch: candle={} burn={}", candle_data.len(), burn_data.len());
+    let n = candle_data.len();
+    eprintln!("output size: {} (32 tokens x 128 dims)", n);
+
+    // Cosine similarity
+    let dot: f64 = candle_data.iter().zip(&burn_data).map(|(a, b)| *a as f64 * *b as f64).sum();
+    let norm_a: f64 = candle_data.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+    let norm_b: f64 = burn_data.iter().map(|x| (*x as f64).powi(2)).sum::<f64>().sqrt();
+    let cosine = dot / (norm_a * norm_b);
+
+    // Max absolute error
+    let max_abs: f32 = candle_data.iter().zip(&burn_data)
+        .map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
+    let mean_abs: f64 = candle_data.iter().zip(&burn_data)
+        .map(|(a, b)| (a - b).abs() as f64).sum::<f64>() / n as f64;
+
+    eprintln!("cosine similarity: {cosine:.6}");
+    eprintln!("mean absolute error: {mean_abs:.6}");
+    eprintln!("max absolute error:  {max_abs:.6}");
+
+    // Print first 8 values from each
+    eprintln!("\nfirst 8 values (token 0):");
+    eprintln!("  candle: {:?}", &candle_data[..8]);
+    eprintln!("  burn:   {:?}", &burn_data[..8]);
+
+    if cosine > 0.95 {
+        eprintln!("\nVALIDATION PASSED (cosine > 0.95)");
+    } else {
+        eprintln!("\nVALIDATION FAILED (cosine = {cosine:.4}, expected > 0.95)");
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let assets = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "assets".into()));
     eprintln!("assets dir: {}", assets.display());
@@ -171,7 +272,15 @@ fn main() -> Result<()> {
     let sizes = vec![32, 64, 128, 256, 512];
     let only = std::env::args().nth(2);
 
-    if only.as_deref() != Some("ov") {
+    let only = only.as_deref();
+
+    #[cfg(feature = "burn-bench")]
+    if only == Some("validate") {
+        eprintln!("\n=== Validating Burn vs Candle ===");
+        return validate(&assets, &tokenizer);
+    }
+
+    if only.is_none() || only == Some("candle") {
         eprintln!("\n=== Candle (Q4K -> F32 on CPU) ===");
         if let Err(e) = bench_candle(&assets, &tokenizer, &sizes) {
             eprintln!("candle error: {e}");
@@ -179,10 +288,18 @@ fn main() -> Result<()> {
     }
 
     #[cfg(feature = "ov")]
-    if only.as_deref() != Some("candle") {
+    if only.is_none() || only == Some("ov") {
         eprintln!("\n=== OpenVINO (INT4) ===");
         if let Err(e) = bench_openvino(&assets, &tokenizer, &sizes) {
             eprintln!("openvino error: {e}");
+        }
+    }
+
+    #[cfg(feature = "burn-bench")]
+    if only.is_none() || only == Some("burn") {
+        eprintln!("\n=== Burn (NdArray F32) ===");
+        if let Err(e) = bench_burn(&assets, &tokenizer, &sizes) {
+            eprintln!("burn error: {e}");
         }
     }
 
