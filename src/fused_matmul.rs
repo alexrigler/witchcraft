@@ -6,7 +6,7 @@
 use candle_core::backend::BackendStorage;
 use candle_core::quantized::k_quants::*;
 use candle_core::quantized::{GgmlDType, GgmlType, QTensor};
-use candle_core::{CpuStorage, CustomOp1, CustomOp2, DType, Layout, Module, Result, Shape, Tensor};
+use candle_core::{CpuStorage, CustomOp1, DType, Layout, Module, Result, Shape, Tensor};
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -299,38 +299,4 @@ pub fn forward_gated_gelu(w0: &MatMul, w1: &MatMul, xs: &Tensor) -> Result<Tenso
             gate.broadcast_mul(&up)
         }
     }
-}
-
-// ---- Fast contiguous f32 add ----
-
-struct FastAddOp;
-
-impl CustomOp2 for FastAddOp {
-    fn name(&self) -> &'static str {
-        "fast-add"
-    }
-
-    fn cpu_fwd(
-        &self,
-        s1: &CpuStorage,
-        l1: &Layout,
-        s2: &CpuStorage,
-        l2: &Layout,
-    ) -> Result<(CpuStorage, Shape)> {
-        let a = s1.as_slice::<f32>()?;
-        let b = s2.as_slice::<f32>()?;
-        let n = l1.shape().elem_count();
-        let a = &a[l1.start_offset()..l1.start_offset() + n];
-        let b = &b[l2.start_offset()..l2.start_offset() + n];
-        let mut dst = vec![0f32; n];
-        for i in 0..n {
-            dst[i] = a[i] + b[i];
-        }
-        Ok((CpuStorage::F32(dst), l1.shape().clone()))
-    }
-}
-
-/// Element-wise add bypassing candle's generic binary op dispatch.
-pub fn fast_add(a: &Tensor, b: &Tensor) -> Result<Tensor> {
-    a.apply_op2_no_bwd(b, &FastAddOp)
 }

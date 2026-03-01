@@ -284,10 +284,7 @@ impl Module for T5LayerFF {
             Some(dense_act) => dense_act.forward(&ys)?,
             None => self.gated_dense_act.as_ref().unwrap().forward(&ys)?,
         };
-        #[cfg(feature = "fused-gelu")]
-        let xs = crate::fused_matmul::fast_add(xs, &ys)?;
-        #[cfg(not(feature = "fused-gelu"))]
-        let xs = (xs + ys)?;
+        let xs = crate::fast_ops::fast_add(xs, &ys)?;
         Ok(xs)
     }
 }
@@ -396,10 +393,7 @@ impl T5Attention {
 
         let (scores, position_bias) = match position_bias {
             Some(position_bias) => {
-                #[cfg(feature = "fused-gelu")]
-                let scores = crate::fused_matmul::fast_add(&scores, position_bias)?;
-                #[cfg(not(feature = "fused-gelu"))]
-                let scores = scores.broadcast_add(position_bias)?;
+                let scores = crate::fast_ops::fast_add(&scores, position_bias)?;
                 (scores, Some(position_bias.clone()))
             }
             None => match &self.relative_attention_bias {
@@ -448,10 +442,7 @@ impl T5Attention {
                         .permute((2, 0, 1))?
                         .unsqueeze(0)?
                         .contiguous()?;
-                    #[cfg(feature = "fused-gelu")]
-                    let scores = crate::fused_matmul::fast_add(&scores, &position_bias)?;
-                    #[cfg(not(feature = "fused-gelu"))]
-                    let scores = scores.broadcast_add(&position_bias)?;
+                    let scores = crate::fast_ops::fast_add(&scores, &position_bias)?;
                     (scores, Some(position_bias))
                 }
             },
@@ -494,10 +485,7 @@ impl T5LayerSelfAttention {
         let (ys, position_bias) =
             self.self_attention
                 .forward(&normed_xs, position_bias, None, mask)?;
-        #[cfg(feature = "fused-gelu")]
-        let ys = crate::fused_matmul::fast_add(xs, &ys)?;
-        #[cfg(not(feature = "fused-gelu"))]
-        let ys = (xs + ys)?;
+        let ys = crate::fast_ops::fast_add(xs, &ys)?;
         Ok((ys, position_bias))
     }
 }
@@ -532,10 +520,7 @@ impl T5LayerCrossAttention {
             Some(key_value_states),
             None,
         )?;
-        #[cfg(feature = "fused-gelu")]
-        let ys = crate::fused_matmul::fast_add(hidden_states, &ys)?;
-        #[cfg(not(feature = "fused-gelu"))]
-        let ys = (hidden_states + ys)?;
+        let ys = crate::fast_ops::fast_add(hidden_states, &ys)?;
         Ok((ys, position_bias))
     }
 }
