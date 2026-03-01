@@ -18,15 +18,27 @@ mod openvino_t5;
 #[cfg(feature = "t5-openvino")]
 use openvino_t5 as t5_encoder;
 
+#[cfg(feature = "t5-bnns")]
+mod bnns;
+#[cfg(feature = "t5-bnns")]
+mod bnns_t5;
+#[cfg(feature = "t5-bnns")]
+use bnns_t5 as t5_encoder;
+
 // Compile-time checks for mutual exclusivity
 #[cfg(not(any(
     feature = "t5-quantized",
-    feature = "t5-openvino"
+    feature = "t5-openvino",
+    feature = "t5-bnns"
 )))]
-compile_error!("Must enable exactly one T5 backend: t5-quantized or t5-openvino");
+compile_error!("Must enable exactly one T5 backend: t5-quantized, t5-openvino, or t5-bnns");
 
-#[cfg(all(feature = "t5-quantized", feature = "t5-openvino"))]
-compile_error!("Cannot enable both t5-quantized and t5-openvino");
+#[cfg(any(
+    all(feature = "t5-quantized", feature = "t5-openvino"),
+    all(feature = "t5-quantized", feature = "t5-bnns"),
+    all(feature = "t5-openvino", feature = "t5-bnns")
+))]
+compile_error!("Cannot enable multiple T5 backends simultaneously");
 
 mod db;
 pub use db::DB;
