@@ -72,8 +72,9 @@ impl T5ModelBuilder {
             .map_err(|e| anyhow!("failed to create OpenVINO Core: {:?}", e))?;
 
         // Load model files
+        // Keep temp_dir alive until after create_infer_request — OpenVINO may access files during compilation
         #[cfg(feature = "embed-assets")]
-        let model = {
+        let (model, _temp_dir) = {
             log::info!("loading embedded OpenVINO model...");
             // For embedded assets, write to temp files since OpenVINO needs file paths
             let temp_dir = tempfile::tempdir()
@@ -86,15 +87,16 @@ impl T5ModelBuilder {
             std::fs::write(&bin_path, MODEL_INT4_BIN.bytes())
                 .map_err(|e| anyhow!("failed to write BIN: {}", e))?;
 
-            core.read_model_from_file(
+            let model = core.read_model_from_file(
                 xml_path.to_str().ok_or_else(|| anyhow!("invalid path"))?,
                 bin_path.to_str().ok_or_else(|| anyhow!("invalid path"))?,
             )
-            .map_err(|e| anyhow!("failed to read OpenVINO model: {:?}", e))?
+            .map_err(|e| anyhow!("failed to read OpenVINO model: {:?}", e))?;
+            (model, temp_dir)
         };
 
         #[cfg(not(feature = "embed-assets"))]
-        let model = {
+        let (model, _temp_dir) = {
             log::info!("loading OpenVINO model...");
             // Decompress XML to temp (small), use uncompressed BIN directly (large, memory-mapped by OpenVINO)
             let temp_dir = tempfile::tempdir()
@@ -106,11 +108,12 @@ impl T5ModelBuilder {
 
             let bin_path = MODEL_INT4_BIN.path(assets);
 
-            core.read_model_from_file(
+            let model = core.read_model_from_file(
                 xml_path.to_str().ok_or_else(|| anyhow!("invalid XML path"))?,
                 bin_path.to_str().ok_or_else(|| anyhow!("invalid BIN path"))?,
             )
-            .map_err(|e| anyhow!("failed to read OpenVINO model: {:?}", e))?
+            .map_err(|e| anyhow!("failed to read OpenVINO model: {:?}", e))?;
+            (model, temp_dir)
         };
 
         // Determine OpenVINO device
@@ -138,6 +141,9 @@ impl T5ModelBuilder {
         let infer_request = compiled_model
             .create_infer_request()
             .map_err(|e| anyhow!("failed to create inference request: {:?}", e))?;
+
+        // Safe to drop temp files now — model is fully loaded and compiled
+        drop(_temp_dir);
 
         Ok(T5EncoderModel {
             ov_infer_request: RefCell::new(infer_request),
