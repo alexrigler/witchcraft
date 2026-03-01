@@ -4,3 +4,38 @@ warp.node
 # Uncompressed OpenVINO model files (large, not versioned)
 assets/xtr-ov-int4.bin
 assets/xtr-ov-int4.xml
+
+# Editor swap/backup files
+*.swp
+*.swo
+*~
+.*.swp
+
+# Development artifacts
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+lcov.info
+Cargo.lock
+
+# Python
+__pycache__/
+*.pyc
+env/
+
+# Test/local data
+backup/
+scifact/
+openvino_model/
+xtr-base-en/
+*.safetensors
+
+# Local scripts
+run.sh
+clear.sh
+import.sh
+session.txt
+output.txt
+missing
+d
+l
