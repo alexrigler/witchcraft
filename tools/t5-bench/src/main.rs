@@ -80,6 +80,26 @@ fn bench_candle(assets: &PathBuf, tokenizer: &tokenizers::Tokenizer, sizes: &[us
 fn bench_openvino(assets: &PathBuf, tokenizer: &tokenizers::Tokenizer, sizes: &[usize]) -> Result<()> {
     use openvino::{Core, DeviceType, Shape};
 
+    #[cfg(target_os = "windows")]
+    {
+        let dll_file = assets.join("openvino_c.dll");
+        if dll_file.exists() {
+            // Get absolute path
+            let abs_assets = assets.canonicalize().unwrap_or_else(|_| assets.clone());
+            if let Some(assets_str) = abs_assets.to_str() {
+                // Add to PATH environment variable at the front
+                if let Ok(current_path) = std::env::var("PATH") {
+                    let new_path = format!("{};{}", assets_str, current_path);
+                    unsafe {
+                        std::env::set_var("PATH", new_path);
+                    }
+                    eprintln!("[INFO] Added assets directory to PATH for OpenVINO DLLs: {}", assets_str);
+                }
+            }
+        }
+    }
+
+
     let base = "Bananas are berries but strawberries are not. Octopuses have three hearts and blue blood. A day on Venus is longer than a year on Venus. There are more trees on Earth than stars in the Milky Way.";
 
     // For each size, create a fresh OV model+infer request to avoid shape-change issues.
