@@ -87,7 +87,6 @@ pub mod progress {
     use indicatif::{ProgressBar, ProgressStyle};
     pub struct Bar {
         pb: ProgressBar,
-        label: String,
     }
     pub fn new(len: u64) -> Bar {
         new_with_label(len, "")
@@ -103,7 +102,6 @@ pub mod progress {
         }
         Bar {
             pb,
-            label: label.to_string(),
         }
     }
     impl Bar {
