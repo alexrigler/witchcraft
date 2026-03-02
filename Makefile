@@ -41,7 +41,7 @@ win: download
 	cd /tmp && tar xzf onnxruntime-x86.tgz && rm onnxruntime-x86.tgz
 
 macintel: download /tmp/onnxruntime-osx-x86_64-1.23.0/lib/libonnxruntime.dylib
-	ORT_STRATEGY=system ORT_LIB_LOCATION=/tmp/onnxruntime-osx-x86_64-1.23.0/lib ORT_INCLUDE_LOCATION=/tmp/onnxruntime-osx-x86_64-1.23.0/include ORT_PREFER_DYNAMIC_LINK=1 RUSTFLAGS='-C target-cpu=haswell' cargo build --release --target x86_64-apple-darwin --features t5-onnx,accelerate --bin warp-cli
+	RUSTFLAGS='-C target-cpu=haswell' cargo build --release --target x86_64-apple-darwin --features t5-quantized,hybrid-dequant,accelerate --bin warp-cli
 
 macintelasan: download
 	rustup override set nightly
@@ -56,7 +56,7 @@ mcp: buildemb
 	cmcp "node dist/index.js" tools/call name=search 'arguments:={"q": "teenagers and acne" }'
 
 test: download
-	RUST_LOG=debug cargo llvm-cov nextest --release --features napi,metal,accelerate --lcov --output-path lcov.info # --no-capture
+	RUST_LOG=debug cargo llvm-cov nextest --release --features napi,t5-quantized,metal,accelerate --lcov --output-path lcov.info # --no-capture
 	genhtml lcov.info
 
 nfcorpus: download
