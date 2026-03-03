@@ -98,8 +98,9 @@ xtr = XTR()
 fp16_state_dict = {k: v.half().cpu() for k, v in xtr.state_dict().items()}
 save_file(fp16_state_dict, "xtr.safetensors")
 
-compress_file("xtr-base-en/config.json", "assets/config.json.zst")
-compress_file("xtr-base-en/tokenizer.json", "assets/tokenizer.json.zst")
+import shutil
+shutil.copy("xtr-base-en/config.json", "assets/config.json")
+shutil.copy("xtr-base-en/tokenizer.json", "assets/tokenizer.json")
 
 try:
     model_xml_path, model_bin_path = export_to_openvino(xtr)

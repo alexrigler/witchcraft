@@ -7,13 +7,16 @@ env/bin/transformers: env/pyvenv.cfg
 assets:
 	mkdir -p assets
 
-assets/config.json.zst assets/tokenizer.json.zst xtr.safetensors: env/bin/transformers
+assets/config.json assets/tokenizer.json xtr.safetensors: assets env/bin/transformers
 	(source env/*/activate; python downloadweights.py)
 
-assets/xtr.gguf: xtr.safetensors
+assets/xtr.gguf:  assets xtr.safetensors
 	cargo run -p quantize-tool xtr.safetensors assets/xtr.gguf
 
-download: assets/config.json.zst assets/tokenizer.json.zst assets/xtr.gguf
+assets/xtr-ov-int4.bin assets/xtr-ov-int4.xml:
+	python quantize-int4.py
+
+download: assets assets/config.json assets/tokenizer.json assets/xtr.gguf assets/xtr-ov-int4.bin assets/xtr-ov-int4.xml
 
 build: download
 	RUSTFLAGS='-C target-feature=+neon' cargo build --release --target aarch64-apple-darwin --features t5-quantized,metal,accelerate,napi
@@ -56,3 +59,4 @@ nfcorpus: download
 	cargo run --release --features metal,t5-quantized,progress  --bin warp-cli readcsv datasets/nfcorpus.tsv
 	cargo run --release --features metal,t5-quantized,progress --bin warp-cli embed
 	cargo run --release --features metal,t5-quantized,progress --bin warp-cli index
+quantize_int4.py

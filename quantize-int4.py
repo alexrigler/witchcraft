@@ -10,7 +10,7 @@ import openvino as ov
 import numpy as np
 from pathlib import Path
 import nncf
-import zstandard as zstd
+import shutil
 import os
 
 # Configuration
@@ -25,39 +25,12 @@ ASSETS_DIR = Path("assets")
 NUM_SAMPLES = 300
 
 
-class ProgressReader:
-    def __init__(self, fileobj, label="", report_every_mb=1):
-        self.fileobj = fileobj
-        self.label = label
-        self.total_read = 0
-        self.report_every = report_every_mb * 1024 * 1024
-        self.next_report = self.report_every
-
-    def read(self, size=-1):
-        chunk = self.fileobj.read(size)
-        self.total_read += len(chunk)
-        if self.total_read >= self.next_report:
-            print(f"[{self.label}] Compressed {self.total_read / (1024*1024):.1f} MB...")
-            self.next_report += self.report_every
-        return chunk
-
-
-def compress_file(in_path: str, out_path: str, level: int = 19):
-    """Compress a file using zstandard."""
-    print(f"Compressing {in_path} -> {out_path} ...")
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-
-    with open(in_path, "rb") as src_file:
-        reader = ProgressReader(src_file, label=os.path.basename(in_path))
-        cctx = zstd.ZstdCompressor(level=level)
-        with open(out_path, "wb") as dst_file:
-            cctx.copy_stream(reader, dst_file)
 
 
 def create_calibration_dataset():
     """Create calibration dataset with random tokens."""
     print(f"Creating calibration dataset with {NUM_SAMPLES} samples...")
-    seq_lengths = [32, 64, 128, 256, 512]
+    seq_lengths = [32, 64, 128, 256, 512, 1024, 2048]
     calibration_data = []
     for i in range(NUM_SAMPLES):
         seq_len = seq_lengths[i % len(seq_lengths)]
@@ -132,24 +105,24 @@ def quantize_model_int4():
     print(f"Compression: {fp16_size/int4_size:.2f}x")
     print(f"Size reduction: {((fp16_size - int4_size) / fp16_size * 100):.1f}%")
 
-    # Compress and save to assets/
+    # Copy to assets/
     print(f"\n{'='*60}")
-    print(f"Saving compressed model to assets/...")
+    print(f"Saving model to assets/...")
     print(f"{'='*60}")
     ASSETS_DIR.mkdir(exist_ok=True)
 
-    compress_file(str(int4_xml), str(ASSETS_DIR / "xtr-ov-int4.xml.zst"))
-    compress_file(str(int4_bin), str(ASSETS_DIR / "xtr-ov-int4.bin.zst"))
+    shutil.copy(str(int4_xml), str(ASSETS_DIR / "xtr-ov-int4.xml"))
+    shutil.copy(str(int4_bin), str(ASSETS_DIR / "xtr-ov-int4.bin"))
 
-    # Check compressed sizes
-    compressed_xml_size = (ASSETS_DIR / "xtr-ov-int4.xml.zst").stat().st_size / (1024 * 1024)
-    compressed_bin_size = (ASSETS_DIR / "xtr-ov-int4.bin.zst").stat().st_size / (1024 * 1024)
-    total_compressed = compressed_xml_size + compressed_bin_size
+    # Check sizes
+    xml_size = (ASSETS_DIR / "xtr-ov-int4.xml").stat().st_size / (1024 * 1024)
+    bin_size = (ASSETS_DIR / "xtr-ov-int4.bin").stat().st_size / (1024 * 1024)
+    total_size = xml_size + bin_size
 
     print(f"\nAssets saved:")
-    print(f"  {ASSETS_DIR / 'xtr-ov-int4.xml.zst'} ({compressed_xml_size:.2f} MB)")
-    print(f"  {ASSETS_DIR / 'xtr-ov-int4.bin.zst'} ({compressed_bin_size:.2f} MB)")
-    print(f"  Total compressed: {total_compressed:.2f} MB")
+    print(f"  {ASSETS_DIR / 'xtr-ov-int4.xml'} ({xml_size:.2f} MB)")
+    print(f"  {ASSETS_DIR / 'xtr-ov-int4.bin'} ({bin_size:.2f} MB)")
+    print(f"  Total: {total_size:.2f} MB")
     print(f"\nTo use the INT4 model:")
     print(f"  OPENVINO_MODEL_PATH=openvino_model/int4 sh run.sh")
 

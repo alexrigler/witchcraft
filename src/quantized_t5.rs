@@ -15,7 +15,6 @@
 //! - 🤗 [Model Card](https://huggingface.co/t5-base)
 //! - 🤗 Original model from [T5](https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py)
 
-use crate::embed_zst_asset;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::Activation;
 use candle_transformers::models::t5::{
@@ -687,8 +686,10 @@ impl T5EncoderModel {
     }
 }
 
-embed_zst_asset!(pub CONFIG,    "config.json.zst");
-embed_zst_asset!(pub TOKENIZER, "tokenizer.json.zst");
+use crate::embed_asset;
+
+embed_asset!(pub CONFIG,    "config.json");
+embed_asset!(pub TOKENIZER, "tokenizer.json");
 
 pub struct T5ModelBuilder {
     config: Config,

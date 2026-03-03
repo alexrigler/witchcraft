@@ -8,8 +8,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 fn load_tokenizer(assets: &PathBuf) -> Result<tokenizers::Tokenizer> {
-    let compressed = std::fs::read(assets.join("tokenizer.json.zst"))?;
-    let bytes = zstd::stream::decode_all(std::io::Cursor::new(compressed))?;
+    let bytes = std::fs::read(assets.join("tokenizer.json"))?;
     let tokenizer = tokenizers::Tokenizer::from_bytes(&bytes)
         .map_err(|e| anyhow::anyhow!("tokenizer: {e}"))?;
     Ok(tokenizer)
@@ -31,8 +30,7 @@ fn make_input(tokenizer: &tokenizers::Tokenizer, base: &str, min_tokens: usize) 
 fn bench_candle(assets: &PathBuf, tokenizer: &tokenizers::Tokenizer, sizes: &[usize]) -> Result<()> {
     let device = Device::Cpu;
 
-    let compressed = std::fs::read(assets.join("config.json.zst"))?;
-    let cfg_bytes = zstd::stream::decode_all(std::io::Cursor::new(compressed))?;
+    let cfg_bytes = std::fs::read(assets.join("config.json"))?;
     let config: quantized_t5::Config = serde_json::from_slice(&cfg_bytes)?;
 
     let t0 = Instant::now();
@@ -111,13 +109,7 @@ fn bench_openvino(assets: &PathBuf, tokenizer: &tokenizers::Tokenizer, sizes: &[
         for attempt in 0..3 {
             let result: Result<()> = (|| {
                 let mut core = Core::new().map_err(|e| anyhow::anyhow!("ov core: {e:?}"))?;
-                let temp_dir = tempfile::tempdir()?;
-                let xml_path = temp_dir.path().join("model.xml");
-                {
-                    let compressed = std::fs::read(assets.join("xtr-ov-int4.xml.zst"))?;
-                    let xml_bytes = zstd::stream::decode_all(std::io::Cursor::new(compressed))?;
-                    std::fs::write(&xml_path, xml_bytes)?;
-                }
+                let xml_path = assets.join("xtr-ov-int4.xml");
                 let bin_path = assets.join("xtr-ov-int4.bin");
 
                 let model = core.read_model_from_file(
