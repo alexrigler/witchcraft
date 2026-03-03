@@ -167,7 +167,7 @@ pub fn bulk_search(
 }
 
 fn main() -> Result<()> {
-    let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Debug));
+    let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info));
 
     // Log CPU feature flags
     #[cfg(target_feature = "avx2")]

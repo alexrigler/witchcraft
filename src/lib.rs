@@ -49,6 +49,12 @@ pub mod rans64;
 
 mod merger;
 
+mod priority;
+use priority::PriorityManager;
+
+mod progress_reporter;
+use progress_reporter::ProgressReporter;
+
 pub mod types;
 pub use types::SqlStatementInternal;
 
@@ -188,6 +194,7 @@ fn kmeans(data: &Tensor, k: usize, max_iter: usize) -> Result<Tensor> {
     let (m, n) = data.dims2()?;
     debug!("kmeans k={} m={} n={}...", k, m, n);
 
+    let mut priority_mgr = PriorityManager::new();
     let total: u64 = (max_iter * k).try_into()?;
     let bar = progress::new_with_label(total, "kmeans");
     let device = data.device();
@@ -204,6 +211,7 @@ fn kmeans(data: &Tensor, k: usize, max_iter: usize) -> Result<Tensor> {
     let data_flat = data.flatten_all()?.to_vec1::<f32>()?;
 
     for _ in 0..max_iter {
+        priority_mgr.check_and_adjust();
         let centers_t = centers.transpose(D::Minus1, D::Minus2)?;
         let cluster_assignments = matmul_argmax_batched(&data, &centers_t, 1024)?;
         let assignments = cluster_assignments.to_vec1::<u32>()?;
@@ -318,6 +326,7 @@ fn write_buckets(
     embeddings_sql: &str,
     expected_count: u64,
 ) -> Result<(Vec<tempfile::NamedTempFile>, Vec<u32>, Tensor)> {
+    let mut priority_mgr = PriorityManager::new();
     let mut mmuls_total = 0;
     let mut writes_total = 0;
 
@@ -344,6 +353,8 @@ fn write_buckets(
     let centers_cpu = centers.to_device(&Device::Cpu)?;
     let centers_t = centers.transpose(D::Minus1, D::Minus2)?;
     while !done {
+        priority_mgr.check_and_adjust();
+
         match results.next() {
             Some(result) => {
                 let (id, chunkid, embeddings, counts) = result?;
@@ -384,7 +395,7 @@ fn write_buckets(
 
             // Use batched matmul+argmax to avoid materializing huge intermediate matrix
             let cluster_assignments = matmul_argmax_batched(&data, &centers_t, 1024)?.to_device(&Device::Cpu)?;
-            info!("simmax took {} ms", now.elapsed().as_millis());
+            debug!("simmax took {} ms", now.elapsed().as_millis());
             mmuls_total += now.elapsed().as_millis();
 
             let now = std::time::Instant::now();
@@ -1142,7 +1153,7 @@ impl<'a> Iterator for Gatherer<'a> {
                     .unwrap();
                 let (m, _n) = embeddings.dims2().unwrap();
                 let dt = now.elapsed().as_secs_f64();
-                info!(
+                debug!(
                     "embedder took {} ms ({} rows/s).",
                     now.elapsed().as_millis(),
                     ((m as f64) / dt).round()
@@ -1248,6 +1259,25 @@ fn stretch_rows(a: &Tensor) -> Result<Tensor> {
 }
 
 pub fn embed_chunks(db: &DB, embedder: &Embedder, limit: Option<usize>) -> Result<usize> {
+    let mut priority_mgr = PriorityManager::new();
+
+    // Count total documents to embed for progress reporting
+    let mut progress = {
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM document
+            LEFT JOIN chunk ON document.hash = chunk.hash
+            WHERE chunk.hash IS NULL
+            {}",
+            match limit {
+                Some(limit) => format!("LIMIT {limit}"),
+                _ => String::new(),
+            }
+        );
+        let mut count_query = db.query(&count_sql)?;
+        let total: usize = count_query.query_row((), |row| Ok(row.get::<_, usize>(0)?))?;
+        ProgressReporter::new("embed", total)
+    };
+
     let sql = format!(
         "SELECT
         document.hash,document.body,document.lens
@@ -1266,7 +1296,9 @@ pub fn embed_chunks(db: &DB, embedder: &Embedder, limit: Option<usize>) -> Resul
     let embedding_iter = Gatherer::new(&mut query, embedder);
     let mut count = 0;
     for (hash, embeddings, counts) in embedding_iter {
-        info!(
+        priority_mgr.check_and_adjust();
+
+        debug!(
             "got embedding for chunk with hash {} {:?} {:?}",
             hash,
             embeddings.dims2()?,
@@ -1303,13 +1335,16 @@ pub fn embed_chunks(db: &DB, embedder: &Embedder, limit: Option<usize>) -> Resul
         match db.add_chunk(&hash, "xtr-base-en", &bytes, &counts) {
             Ok(()) => {
                 count += 1;
+                progress.inc(1);
             }
             Err(v) => {
-                info!("add_chunk failed {}", v);
+                warn!("add_chunk failed {}", v);
                 break;
             }
         };
     }
+    progress.finish();
+
     debug!("embedded {count} chunks");
     if count > 0 {
         db.checkpoint();
