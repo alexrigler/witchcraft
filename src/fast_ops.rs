@@ -1,7 +1,10 @@
 //! Fast contiguous f32 ops bypassing candle's generic dispatch.
+//!
+//! Also provides [`PackedRight`] for efficient `A × B^T` using fbgemm-rs
+//! when available, with transparent fallback to candle matmul.
 
 use candle_core::backend::BackendStorage;
-use candle_core::{CpuStorage, CustomOp2, DType, Layout, Result, Shape, Tensor};
+use candle_core::{CpuStorage, CustomOp2, DType, Device, Layout, Result, Shape, Tensor};
 
 struct FastAddOp;
 
@@ -37,12 +40,73 @@ impl CustomOp2 for FastAddOp {
 /// On Metal/GPU, falls back to candle's built-in addition since custom ops
 /// have overhead on GPU and the optimization is CPU-specific.
 pub fn fast_add(a: &Tensor, b: &Tensor) -> Result<Tensor> {
-    // Check if we're on Metal device
-    if matches!(a.device(), candle_core::Device::Metal(_)) {
-        // Use candle's built-in addition for Metal
+    if matches!(a.device(), Device::Metal(_)) {
         a + b
     } else {
-        // Use fast CPU implementation
         a.apply_op2_no_bwd(b, &FastAddOp)
     }
+}
+
+// ---- Packed matmul: A × B^T ----
+
+/// Pre-packed right-hand side for efficient `A × B^T` computation.
+/// Pack once with [`PackedRight::new`], then call [`PackedRight::matmul`] repeatedly.
+/// Uses fbgemm-rs on CPU when available, otherwise candle matmul.
+pub enum PackedRight {
+    #[cfg(feature = "fbgemm")]
+    Packed {
+        inner: fbgemm_rs::PackedMatrix,
+        n: usize,
+        device: Device,
+    },
+    Tensor(Tensor),
+}
+
+impl PackedRight {
+    /// Pack a `[N, D]` tensor for use as the right side of `A × B^T`.
+    pub fn new(b: &Tensor) -> Result<Self> {
+        #[cfg(feature = "fbgemm")]
+        if matches!(b.device(), Device::Cpu) && b.dtype() == DType::F32 {
+            let (n, d) = b.dims2()?;
+            let data = b.flatten_all()?.to_vec1::<f32>()?;
+            let packed = fbgemm_rs::PackedMatrix::from_transposed(d, n, &data);
+            return Ok(Self::Packed { inner: packed, n, device: Device::Cpu });
+        }
+        Ok(Self::Tensor(b.clone()))
+    }
+
+    /// Compute `A × B^T` where A is `[M, D]`. Returns `[M, N]`.
+    pub fn matmul(&self, a: &Tensor) -> Result<Tensor> {
+        match self {
+            #[cfg(feature = "fbgemm")]
+            Self::Packed { inner, n, device } => {
+                let (m, _d) = a.dims2()?;
+                let a_data = a.flatten_all()?.to_vec1::<f32>()?;
+                let mut c = vec![0f32; m * *n];
+                fbgemm_rs::sgemm_simple_par(m, &a_data, inner, &mut c);
+                Tensor::from_vec(c, (m, *n), device)
+            }
+            Self::Tensor(b) => a.matmul(&b.t()?),
+        }
+    }
+}
+
+/// Compute `A × B^T` where A is `[M, D]` and B is `[N, D]`. Returns `[M, N]`.
+/// Uses fbgemm-rs on CPU when available, otherwise candle matmul.
+pub fn matmul_t(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "fbgemm")]
+    if matches!(a.device(), Device::Cpu) && a.dtype() == DType::F32 {
+        let (m, d) = a.dims2()?;
+        let (n, d2) = b.dims2()?;
+        if d != d2 {
+            candle_core::bail!("matmul_t dimension mismatch: a is [{m},{d}], b is [{n},{d2}]");
+        }
+        let a_data = a.flatten_all()?.to_vec1::<f32>()?;
+        let b_data = b.flatten_all()?.to_vec1::<f32>()?;
+        let packed = fbgemm_rs::PackedMatrix::from_transposed(d, n, &b_data);
+        let mut c = vec![0f32; m * n];
+        fbgemm_rs::sgemm_simple_par(m, &a_data, &packed, &mut c);
+        return Tensor::from_vec(c, (m, n), a.device());
+    }
+    a.matmul(&b.t()?)
 }

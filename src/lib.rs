@@ -8,7 +8,6 @@ use std::sync::RwLock;
 pub mod quantized_t5;
 #[cfg(feature = "t5-quantized")]
 use quantized_t5 as t5_encoder;
-#[cfg(feature = "t5-quantized")]
 pub mod fast_ops;
 #[cfg(feature = "hybrid-dequant")]
 pub mod fused_matmul;
@@ -171,7 +170,7 @@ pub mod progress {
     }
 }
 
-fn matmul_argmax_batched(t: &Tensor, centers_t: &Tensor, batch_size: usize) -> Result<Tensor> {
+fn matmul_argmax_batched(t: &Tensor, centers: &fast_ops::PackedRight, batch_size: usize) -> Result<Tensor> {
     let (m, _n) = t.dims2()?;
     let device = t.device();
 
@@ -181,7 +180,7 @@ fn matmul_argmax_batched(t: &Tensor, centers_t: &Tensor, batch_size: usize) -> R
         let end = (start + batch_size).min(m);
         let batch_len = end - start;
         let batch = t.narrow(0, start, batch_len)?;
-        let sim = batch.matmul(centers_t)?;
+        let sim = centers.matmul(&batch)?;
         let batch_assignments = sim.argmax(D::Minus1)?;
         let batch_assignments = batch_assignments.to_vec1::<u32>()?;
         assignments.extend(batch_assignments);
@@ -211,8 +210,8 @@ fn kmeans(data: &Tensor, k: usize, max_iter: usize) -> Result<Tensor> {
     let data_flat = data.flatten_all()?.to_vec1::<f32>()?;
 
     for _ in 0..max_iter {
-        let centers_t = centers.transpose(D::Minus1, D::Minus2)?;
-        let cluster_assignments = matmul_argmax_batched(&data, &centers_t, 1024)?;
+        let packed_centers = fast_ops::PackedRight::new(&centers)?;
+        let cluster_assignments = matmul_argmax_batched(&data, &packed_centers, 1024)?;
         let assignments = cluster_assignments.to_vec1::<u32>()?;
 
         // Single O(m × n) pass: accumulate per-cluster sums directly into a
@@ -350,7 +349,7 @@ fn write_buckets(
     let mut batch = 0;
     let mut tmpfiles = vec![];
     let centers_cpu = centers.to_device(&Device::Cpu)?;
-    let centers_t = centers.transpose(D::Minus1, D::Minus2)?;
+    let packed_centers = fast_ops::PackedRight::new(&centers)?;
     while !done {
         match results.next() {
             Some(result) => {
@@ -391,7 +390,7 @@ fn write_buckets(
             let data = Tensor::cat(&embeddings, 0)?.to_device(&device)?;
 
             // Use batched matmul+argmax to avoid materializing huge intermediate matrix
-            let cluster_assignments = matmul_argmax_batched(&data, &centers_t, 1024)?.to_device(&Device::Cpu)?;
+            let cluster_assignments = matmul_argmax_batched(&data, &packed_centers, 1024)?.to_device(&Device::Cpu)?;
             debug!("simmax took {} ms", now.elapsed().as_millis());
             mmuls_total += now.elapsed().as_millis();
 
@@ -745,7 +744,7 @@ pub fn match_centroids(
         let now = std::time::Instant::now();
 
         let query_centroid_similarity =
-            query_embeddings.matmul(&centers_matrix.transpose(D::Minus1, D::Minus2)?)?;
+            fast_ops::matmul_t(&query_embeddings, &centers_matrix)?;
         let query_centroid_similarity = query_centroid_similarity.to_device(&Device::Cpu)?;
 
         // Extract centroid scores for later use (m queries × n_clusters)
@@ -912,8 +911,7 @@ pub fn match_centroids(
         let all_residuals = Tensor::cat(&all_residuals, 0)?;
         let all_residuals = all_residuals.to_device(query_embeddings.device())?;
 
-        let residual_sims = query_embeddings
-            .matmul(&all_residuals.t()?)?
+        let residual_sims = fast_ops::matmul_t(&query_embeddings, &all_residuals)?
             .transpose(0, 1)?;
         let residual_sims = residual_sims.to_device(&Device::Cpu)?;
         let residual_sims = residual_sims.to_dtype(DType::F32)?.contiguous()?;
@@ -936,8 +934,7 @@ pub fn match_centroids(
         let all_unindexed = Tensor::cat(&unindexed_embeddings, 0)?;
         let all_unindexed = all_unindexed.to_device(query_embeddings.device())?;
 
-        let unindexed_sims = query_embeddings
-            .matmul(&all_unindexed.t()?)?
+        let unindexed_sims = fast_ops::matmul_t(&query_embeddings, &all_unindexed)?
             .transpose(0, 1)?;
         let unindexed_sims = unindexed_sims.to_device(&Device::Cpu)?;
         let unindexed_sims = unindexed_sims.to_dtype(DType::F32)?.contiguous()?;
@@ -1677,7 +1674,7 @@ pub fn score_query_sentences(
         ses.extend(split);
     }
     let ses = Tensor::cat(&ses, 0)?;
-    let sim = ses.matmul(&qe.transpose(D::Minus1, D::Minus2)?)?;
+    let sim = fast_ops::matmul_t(&ses, &qe)?;
     let sim = sim.to_device(&Device::Cpu)?;
 
     let mut scores = vec![];
