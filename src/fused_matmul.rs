@@ -297,7 +297,7 @@ impl CustomOp1 for FbgemmOp {
         let slice = &slice[layout.start_offset()..layout.start_offset() + src_shape.elem_count()];
         let mut dst_storage = vec![0f32; dst_shape.elem_count()];
 
-        fbgemm_rs::sgemm_simple_par(m, slice, &self.0, &mut dst_storage);
+        fbgemm_rs::sgemm_simple(m, slice, &self.0, &mut dst_storage);
 
         Ok((CpuStorage::F32(dst_storage), dst_shape))
     }

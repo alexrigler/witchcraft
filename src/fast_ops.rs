@@ -83,7 +83,7 @@ impl PackedRight {
                 let (m, _d) = a.dims2()?;
                 let a_data = a.flatten_all()?.to_vec1::<f32>()?;
                 let mut c = vec![0f32; m * *n];
-                fbgemm_rs::sgemm_simple_par(m, &a_data, inner, &mut c);
+                fbgemm_rs::sgemm_simple(m, &a_data, inner, &mut c);
                 Tensor::from_vec(c, (m, *n), device)
             }
             Self::Tensor(b) => a.matmul(&b.t()?),
@@ -105,7 +105,7 @@ pub fn matmul_t(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         let b_data = b.flatten_all()?.to_vec1::<f32>()?;
         let packed = fbgemm_rs::PackedMatrix::from_transposed(d, n, &b_data);
         let mut c = vec![0f32; m * n];
-        fbgemm_rs::sgemm_simple_par(m, &a_data, &packed, &mut c);
+        fbgemm_rs::sgemm_simple(m, &a_data, &packed, &mut c);
         return Tensor::from_vec(c, (m, n), a.device());
     }
     a.matmul(&b.t()?)
