@@ -72,10 +72,33 @@ impl Embedder {
             })
             .collect();
 
-        let matrix = Tensor::stack(&token_embs, 0)?.unsqueeze(0)?;
+        // Filter out low-signal tokens (e.g. </s>, padding) whose pre-normalization
+        // norm is near zero. These carry no directional information and become
+        // amplified noise after L2 normalization. Content tokens have norm ~5.0+;
+        // </s> tokens have norm ~0.27.
+        const MIN_NORM: f32 = 1.0;
+        let mut filtered_embs = Vec::with_capacity(token_embs.len());
+        let mut filtered_offsets = Vec::with_capacity(offsets.len());
+        for (emb, offset) in token_embs.into_iter().zip(offsets.into_iter()) {
+            let norm = emb.sqr()?.sum_all()?.sqrt()?.to_scalar::<f32>()?;
+            if norm >= MIN_NORM {
+                filtered_embs.push(emb);
+                filtered_offsets.push(offset);
+            }
+        }
+        if filtered_embs.is_empty() {
+            anyhow::bail!("all token embeddings below minimum norm threshold");
+        }
+
+        let matrix = Tensor::stack(&filtered_embs, 0)?.unsqueeze(0)?;
         let normalized = normalize_l2(&matrix)?;
-        debug!("embedder took {} ms.", now.elapsed().as_millis());
-        Ok((normalized, offsets))
+        debug!(
+            "embedder took {} ms, kept {}/{} tokens.",
+            now.elapsed().as_millis(),
+            filtered_embs.len(),
+            n_tokens,
+        );
+        Ok((normalized, filtered_offsets))
     }
 
     /*
