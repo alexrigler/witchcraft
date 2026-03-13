@@ -37,9 +37,6 @@ win: download
 macintel: download
 	RUSTFLAGS='-C target-cpu=haswell' cargo build --release --target x86_64-apple-darwin --features t5-quantized,fbgemm,hybrid-dequant,progress
 
-macintelasan: download
-	rustup override set nightly
-	RUSTFLAGS="-Z sanitizer=address -C target-feature=+avx2,+fma" cargo build -Z build-std --release --target x86_64-apple-darwin --features t5-openvino,accelerate
 
 run: build
 	node index.js
@@ -59,6 +56,13 @@ bench:
 	cargo run -p t5-bench --release --features hybrid-dequant,ov
 
 nfcorpus: download
+	rm -rf mydb.sqlite
 	cargo run --release --features metal,t5-quantized,progress  --bin warp-cli readcsv datasets/nfcorpus.tsv
 	cargo run --release --features metal,t5-quantized,progress --bin warp-cli embed
 	cargo run --release --features metal,t5-quantized,progress --bin warp-cli index
+
+nfcorpus-cpu: download
+	rm -rf mydb.sqlite
+	cargo run --release --features fbgemm,t5-quantized,progress  --bin warp-cli readcsv datasets/nfcorpus.tsv
+	cargo run --release --features fbgemm,t5-quantized,progress --bin warp-cli embed
+	cargo run --release --features fbgemm,t5-quantized,progress --bin warp-cli index
