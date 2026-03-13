@@ -289,15 +289,17 @@ impl Module for T5LayerFF {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Variants are conditionally used based on hybrid-dequant feature
+enum AttentionWeights {
+    /// Fused QKV matrix (hybrid-dequant: concatenated q, k, v for single matmul)
+    Fused(QMatMul),
+    /// Separate Q, K, V matrices
+    Separate { q: QMatMul, k: QMatMul, v: QMatMul },
+}
+
+#[derive(Debug, Clone)]
 struct T5Attention {
-    #[cfg(feature = "hybrid-dequant")]
-    qkv: QMatMul,
-    #[cfg(not(feature = "hybrid-dequant"))]
-    q: QMatMul,
-    #[cfg(not(feature = "hybrid-dequant"))]
-    k: QMatMul,
-    #[cfg(not(feature = "hybrid-dequant"))]
-    v: QMatMul,
+    qkv: AttentionWeights,
     o: QMatMul,
     n_heads: usize,
     d_kv: usize,
@@ -310,6 +312,7 @@ struct T5Attention {
 impl T5Attention {
     fn load(has_relative_attention_bias: bool, vb: VarBuilder, cfg: &Config) -> Result<Self> {
         let inner_dim = cfg.num_heads * cfg.d_kv;
+
         #[cfg(feature = "hybrid-dequant")]
         let (qkv, o) = {
             let q_w = vb
@@ -324,18 +327,23 @@ impl T5Attention {
                 .pp("v")
                 .get((inner_dim, cfg.d_model), "weight")?
                 .dequantize(vb.device())?;
-            let qkv = QMatMul::from_tensor(Tensor::cat(&[&q_w, &k_w, &v_w], 0)?);
+            let qkv = AttentionWeights::Fused(
+                QMatMul::from_tensor(Tensor::cat(&[&q_w, &k_w, &v_w], 0)?)
+            );
             let o = new_qmm_dequant(inner_dim, cfg.d_model, vb.pp("o"))?;
             (qkv, o)
         };
+
         #[cfg(not(feature = "hybrid-dequant"))]
-        let (q, k, v, o) = {
+        let (qkv, o) = {
             let q = new_qmm(cfg.d_model, inner_dim, vb.pp("q"))?;
             let k = new_qmm(cfg.d_model, inner_dim, vb.pp("k"))?;
             let v = new_qmm(cfg.d_model, inner_dim, vb.pp("v"))?;
+            let qkv = AttentionWeights::Separate { q, k, v };
             let o = new_qmm(inner_dim, cfg.d_model, vb.pp("o"))?;
-            (q, k, v, o)
+            (qkv, o)
         };
+
         let relative_attention_bias = if has_relative_attention_bias {
             let emb = Embedding::new(
                 cfg.relative_attention_num_buckets,
@@ -346,15 +354,9 @@ impl T5Attention {
         } else {
             None
         };
+
         Ok(Self {
-            #[cfg(feature = "hybrid-dequant")]
             qkv,
-            #[cfg(not(feature = "hybrid-dequant"))]
-            q,
-            #[cfg(not(feature = "hybrid-dequant"))]
-            k,
-            #[cfg(not(feature = "hybrid-dequant"))]
-            v,
             o,
             n_heads: cfg.num_heads,
             d_kv: cfg.d_kv,
@@ -374,43 +376,43 @@ impl T5Attention {
     ) -> Result<(Tensor, Option<Tensor>)> {
         let (b_sz, q_len) = (xs.dim(0)?, xs.dim(1)?);
 
-        #[cfg(feature = "hybrid-dequant")]
-        let (q, k, v) = {
-            let _ = key_value_states;
-            let qkv = self.qkv.forward(xs)?;
-            let qkv = qkv
-                .reshape((b_sz, q_len, 3, self.n_heads, self.d_kv))?
-                .permute((2, 0, 3, 1, 4))?
-                .contiguous()?;
-            (
-                qkv.narrow(0, 0, 1)?.squeeze(0)?,
-                qkv.narrow(0, 1, 1)?.squeeze(0)?,
-                qkv.narrow(0, 2, 1)?.squeeze(0)?,
-            )
-        };
-        #[cfg(not(feature = "hybrid-dequant"))]
-        let (q, k, v) = {
-            let kv_input = match key_value_states {
-                None => xs,
-                Some(key_value_states) => key_value_states,
-            };
-            let kv_len = kv_input.dim(1)?;
-            let q = self.q.forward(xs)?;
-            let k = self.k.forward(kv_input)?;
-            let v = self.v.forward(kv_input)?;
-            let q = q
-                .reshape((b_sz, q_len, self.n_heads, self.d_kv))?
-                .transpose(1, 2)?
-                .contiguous()?;
-            let k = k
-                .reshape((b_sz, kv_len, self.n_heads, self.d_kv))?
-                .transpose(1, 2)?
-                .contiguous()?;
-            let v = v
-                .reshape((b_sz, kv_len, self.n_heads, self.d_kv))?
-                .transpose(1, 2)?
-                .contiguous()?;
-            (q, k, v)
+        let (q, k, v) = match &self.qkv {
+            AttentionWeights::Fused(qkv_mm) => {
+                let _ = key_value_states;
+                let qkv = qkv_mm.forward(xs)?;
+                let qkv = qkv
+                    .reshape((b_sz, q_len, 3, self.n_heads, self.d_kv))?
+                    .permute((2, 0, 3, 1, 4))?
+                    .contiguous()?;
+                (
+                    qkv.narrow(0, 0, 1)?.squeeze(0)?,
+                    qkv.narrow(0, 1, 1)?.squeeze(0)?,
+                    qkv.narrow(0, 2, 1)?.squeeze(0)?,
+                )
+            }
+            AttentionWeights::Separate { q: q_mm, k: k_mm, v: v_mm } => {
+                let kv_input = match key_value_states {
+                    None => xs,
+                    Some(key_value_states) => key_value_states,
+                };
+                let kv_len = kv_input.dim(1)?;
+                let q = q_mm.forward(xs)?;
+                let k = k_mm.forward(kv_input)?;
+                let v = v_mm.forward(kv_input)?;
+                let q = q
+                    .reshape((b_sz, q_len, self.n_heads, self.d_kv))?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                let k = k
+                    .reshape((b_sz, kv_len, self.n_heads, self.d_kv))?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                let v = v
+                    .reshape((b_sz, kv_len, self.n_heads, self.d_kv))?
+                    .transpose(1, 2)?
+                    .contiguous()?;
+                (q, k, v)
+            }
         };
 
         let scores = q.matmul(&k.t()?)?;
