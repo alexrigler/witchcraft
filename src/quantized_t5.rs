@@ -729,9 +729,15 @@ impl T5ModelBuilder {
         device: &Device,
         assets: &std::path::Path,
     ) -> candle_core::Result<T5EncoderModel> {
-        // MODEL: mmap GGUF file directly
         let model_path = assets.join("xtr.gguf");
 
+        // TODO: Use mmap for zero-copy loading. Currently VarBuilder::from_gguf allocates
+        // Vec<u8> for each tensor and reads via read_exact(), then copies again into QStorage.
+        // Proper mmap support requires:
+        //   1. Memory-mapping the entire GGUF file (e.g. with memmap2 crate)
+        //   2. Modifying candle's QStorage to accept borrowed slices with proper lifetimes
+        //   3. Keeping the mmap Arc alive as long as tensors reference it
+        // Candle has a TODO for this in quantized/ggml_file.rs but it's not implemented yet.
         let vb =
             candle_transformers::quantized_var_builder::VarBuilder::from_gguf(&model_path, device)?;
 
