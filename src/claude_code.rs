@@ -11,7 +11,6 @@ use crate::DB;
 
 const MIN_CHUNK_CODEPOINTS: usize = 5;
 const MAX_CHUNK_CODEPOINTS: usize = 4000;
-const MAX_TITLE_CODEPOINTS: usize = 240;
 
 // Stable UUID namespace for Claude Code sessions
 const CLAUDE_CODE_NAMESPACE: Uuid = Uuid::from_bytes([
@@ -57,16 +56,6 @@ struct Chunk {
 
 fn codepoint_len(s: &str) -> usize {
     s.chars().count()
-}
-
-fn truncate_codepoints(s: &str, max: usize) -> String {
-    let mut chars = s.chars();
-    let truncated: String = chars.by_ref().take(max).collect();
-    if chars.next().is_some() {
-        format!("{truncated}...")
-    } else {
-        truncated
-    }
 }
 
 fn extract_text(content: &Content) -> Option<String> {
@@ -257,6 +246,13 @@ fn ingest_session(db: &mut DB, path: &Path, project_name: &str, mtime_ms: i64) -
     let session_id = path.file_stem().unwrap().to_string_lossy();
     let splitter = TextSplitter::new(300);
 
+    // Session title: first user message of the entire session
+    let session_title: String = chunks
+        .iter()
+        .find(|c| c.role == "user")
+        .map(|c| c.text.chars().take(240).collect())
+        .unwrap_or_default();
+
     // Split into interactions: each starts at a user message
     let mut interactions: Vec<&[Chunk]> = Vec::new();
     let mut start = 0;
@@ -270,14 +266,10 @@ fn ingest_session(db: &mut DB, path: &Path, project_name: &str, mtime_ms: i64) -
 
     let mut count = 0;
     for (turn_idx, interaction) in interactions.iter().enumerate() {
-        let title_chunk = interaction
-            .iter()
-            .find(|c| c.role == "user")
-            .unwrap_or(&interaction[0]);
-        let title = truncate_codepoints(&title_chunk.text, MAX_TITLE_CODEPOINTS);
+        // Header line with project and session context
+        let header = format!("[{project_name}] {session_title}\n");
+        let mut all_parts = vec![header];
 
-        // Build labeled lines, then split each with text-splitter for sub-chunk lengths
-        let mut all_parts = Vec::new();
         for chunk in *interaction {
             let label = if chunk.role == "user" {
                 "[User]"
@@ -302,8 +294,6 @@ fn ingest_session(db: &mut DB, path: &Path, project_name: &str, mtime_ms: i64) -
         );
 
         let metadata = serde_json::json!({
-            "title": title,
-            "source": "claude_code",
             "project": project_name,
             "session_id": session_id.to_string(),
             "turn": turn_idx,
@@ -343,11 +333,10 @@ fn ingest_memory_file(db: &mut DB, path: &Path, project_name: &str, mtime_ms: i6
         raw.clone()
     };
 
+    let header = format!("[{project_name}] {}\n", filename.trim_end_matches(".md"));
     let splitter = TextSplitter::new(500);
-    let bodies: Vec<String> = splitter
-        .chunks(&body_text)
-        .map(|c| format!("{c}\n"))
-        .collect();
+    let mut bodies = vec![header];
+    bodies.extend(splitter.chunks(&body_text).map(|c| format!("{c}\n")));
     let lengths: Vec<usize> = bodies.iter().map(|b| b.chars().count()).collect();
     let body = bodies.join("");
 
@@ -355,14 +344,7 @@ fn ingest_memory_file(db: &mut DB, path: &Path, project_name: &str, mtime_ms: i6
         return Ok(false);
     }
 
-    let title = truncate_codepoints(
-        &filename.trim_end_matches(".md"),
-        MAX_TITLE_CODEPOINTS,
-    );
-
     let metadata = serde_json::json!({
-        "title": title,
-        "source": "claude_code_memory",
         "project": project_name,
         "path": path.to_string_lossy(),
         "mtime_ms": mtime_ms,
@@ -388,8 +370,7 @@ fn load_watermarks(db: &DB) -> HashMap<String, i64> {
     let mut stmt = match db.query(
         "SELECT json_extract(metadata, '$.path'), max(json_extract(metadata, '$.mtime_ms'))
          FROM document
-         WHERE json_extract(metadata, '$.source') IN ('claude_code', 'claude_code_memory')
-           AND json_extract(metadata, '$.mtime_ms') IS NOT NULL
+         WHERE json_extract(metadata, '$.mtime_ms') IS NOT NULL
          GROUP BY json_extract(metadata, '$.path')",
     ) {
         Ok(s) => s,

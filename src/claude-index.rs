@@ -56,7 +56,6 @@ const DIM: &str = "\x1b[2m";
 const RESET: &str = "\x1b[0m";
 const CYAN: &str = "\x1b[36m";
 const GREEN: &str = "\x1b[32m";
-const YELLOW: &str = "\x1b[33m";
 const MAGENTA: &str = "\x1b[35m";
 
 fn search(db_name: &PathBuf, assets: &PathBuf, q: &str) -> Result<()> {
@@ -67,15 +66,12 @@ fn search(db_name: &PathBuf, assets: &PathBuf, q: &str) -> Result<()> {
     let results = warp::search(&db, &embedder, &mut cache, q, 0.5, 10, true, None)?;
     for (score, metadata, body, _body_idx) in &results {
         let meta: serde_json::Value = serde_json::from_str(metadata).unwrap_or_default();
-        let title = meta["title"].as_str().unwrap_or("");
         let project = meta["project"].as_str().unwrap_or("");
-        let source = meta["source"].as_str().unwrap_or("");
         let session_id = meta["session_id"].as_str().unwrap_or("");
         let turn = meta["turn"].as_u64().unwrap_or(0);
         let path = meta["path"].as_str().unwrap_or("");
 
-        println!("{BOLD}{GREEN}{score:.3}{RESET}  {BOLD}{title}{RESET}");
-        println!("  {CYAN}{project}{RESET}  {DIM}{source}{RESET}");
+        println!("{BOLD}{GREEN}{score:.3}{RESET}  {CYAN}{project}{RESET}");
         if !session_id.is_empty() {
             println!("  {MAGENTA}{session_id}{RESET} {DIM}turn {turn}{RESET}");
         }
@@ -83,7 +79,7 @@ fn search(db_name: &PathBuf, assets: &PathBuf, q: &str) -> Result<()> {
             println!("  {DIM}{path}{RESET}");
         }
         let preview: String = body.chars().take(300).collect();
-        println!("  {YELLOW}{preview}{RESET}");
+        println!("  {preview}");
         println!();
     }
     if results.is_empty() {
@@ -105,7 +101,6 @@ fn main() -> Result<()> {
             false => println!("up to date"),
         }
     } else if args.len() >= 3 && args[1] == "search" {
-        update(&db_name, &assets)?;
         let q = args[2..].join(" ");
         search(&db_name, &assets, &q)?;
     } else {
