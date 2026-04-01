@@ -3,6 +3,27 @@
 This is a from-scratch reimplementation of Stanford's XTR-Warp
 semantic search engine ( https://github.com/jlscheerer/xtr-warp ).
 
+## Pickbrain: semantic search over your Claude Code history ##
+
+Included as an example is **pickbrain**, a CLI that indexes your Claude Code
+session transcripts, memory files, and authored documents into a Witchcraft
+database for fast semantic search. Ever wondered "what was that conversation
+where Claude helped me fix the auth middleware?" — pickbrain finds it.
+
+```
+make pickbrain
+pickbrain --update              # ingest new/changed sessions
+pickbrain auth middleware fix    # search across all sessions
+pickbrain --session <UUID> auth  # search within one session
+pickbrain --dump <UUID>          # print full conversation
+```
+
+The source lives in `examples/pickbrain.rs` and demonstrates how to use
+Witchcraft as a library: document ingestion, embedding, indexing, and hybrid
+search — all in about 400 lines of Rust.
+
+---
+
 To run, you will need the XTR weights released by Google Deepmind, and
 this repo contains python scripts for downloading them from Huggingface
 and quantizing to GGUF format:
