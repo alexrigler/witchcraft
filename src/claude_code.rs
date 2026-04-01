@@ -538,6 +538,7 @@ pub fn ingest_claude_code(db: &mut DB) -> Result<(usize, usize, usize)> {
             };
 
             if changed {
+                println!("{}", jsonl_path.display());
                 // Only scan changed sessions for authored files
                 for p in extract_written_paths(jsonl_path) {
                     if p.extension().is_some_and(|ext| ext == "md") && p.is_file() {
@@ -574,6 +575,7 @@ pub fn ingest_claude_code(db: &mut DB) -> Result<(usize, usize, usize)> {
                         continue;
                     }
                 }
+                println!("{}", md_path.display());
                 match ingest_memory_file(db, md_path, &project_name, mtime_ms) {
                     Ok(true) => memory_count += 1,
                     Ok(false) => {}
@@ -595,6 +597,7 @@ pub fn ingest_claude_code(db: &mut DB) -> Result<(usize, usize, usize)> {
                     continue;
                 }
             }
+            println!("{}", md_path.display());
             match ingest_authored_file(db, md_path, &project_name, mtime_ms) {
                 Ok(true) => authored_count += 1,
                 Ok(false) => {}
