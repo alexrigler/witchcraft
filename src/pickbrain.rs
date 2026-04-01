@@ -87,13 +87,33 @@ fn colors() -> Colors {
     }
 }
 
-fn search(db_name: &PathBuf, assets: &PathBuf, q: &str) -> Result<()> {
+fn search(db_name: &PathBuf, assets: &PathBuf, q: &str, session: Option<&str>) -> Result<()> {
+    use warp::types::*;
     let c = colors();
     let device = warp::make_device();
     let embedder = warp::Embedder::new(&device, assets)?;
     let mut cache = warp::EmbeddingsCache::new(1);
     let db = DB::new_reader(db_name.clone()).unwrap();
-    let results = warp::search(&db, &embedder, &mut cache, q, 0.5, 10, true, None)?;
+    let sql_filter = session.map(|id| SqlStatementInternal {
+        statement_type: SqlStatementType::Condition,
+        condition: Some(SqlConditionInternal {
+            key: "$.session_id".to_string(),
+            operator: SqlOperator::Equals,
+            value: Some(SqlValue::String(id.to_string())),
+        }),
+        logic: None,
+        statements: None,
+    });
+    let results = warp::search(
+        &db,
+        &embedder,
+        &mut cache,
+        q,
+        0.5,
+        10,
+        true,
+        sql_filter.as_ref(),
+    )?;
 
     // Render output to a buffer, then page if needed
     let (_, cols) = terminal_size();
@@ -114,9 +134,17 @@ fn search(db_name: &PathBuf, assets: &PathBuf, q: &str) -> Result<()> {
         } else {
             String::new()
         };
-        writeln!(buf, "{}{timestamp}{}  {}{project}{}{filename}", c.green, c.reset, c.cyan, c.reset)?;
+        writeln!(
+            buf,
+            "{}{timestamp}{}  {}{project}{}{filename}",
+            c.green, c.reset, c.cyan, c.reset
+        )?;
         if !session_id.is_empty() {
-            writeln!(buf, "  {}{session_id}{} {}turn {turn}{}", c.magenta, c.reset, c.dim, c.reset)?;
+            writeln!(
+                buf,
+                "  {}{session_id}{} {}turn {turn}{}",
+                c.magenta, c.reset, c.dim, c.reset
+            )?;
         }
         if idx > 0 {
             write_chunk(&mut buf, &bodies[idx - 1], "")?;
@@ -153,10 +181,18 @@ fn search(db_name: &PathBuf, assets: &PathBuf, q: &str) -> Result<()> {
 fn format_date(iso: &str) -> String {
     // "2026-03-31T09:24:20.675Z" -> "Mar 31 09:24"
     let month = match iso.get(5..7) {
-        Some("01") => "Jan", Some("02") => "Feb", Some("03") => "Mar",
-        Some("04") => "Apr", Some("05") => "May", Some("06") => "Jun",
-        Some("07") => "Jul", Some("08") => "Aug", Some("09") => "Sep",
-        Some("10") => "Oct", Some("11") => "Nov", Some("12") => "Dec",
+        Some("01") => "Jan",
+        Some("02") => "Feb",
+        Some("03") => "Mar",
+        Some("04") => "Apr",
+        Some("05") => "May",
+        Some("06") => "Jun",
+        Some("07") => "Jul",
+        Some("08") => "Aug",
+        Some("09") => "Sep",
+        Some("10") => "Oct",
+        Some("11") => "Nov",
+        Some("12") => "Dec",
         _ => "???",
     };
     let day = iso.get(8..10).unwrap_or("??");
@@ -172,10 +208,101 @@ fn write_chunk(buf: &mut Vec<u8>, text: &str, style: &str) -> std::io::Result<()
     Ok(())
 }
 
+fn parse_range(s: &str) -> (usize, usize) {
+    if let Some((a, b)) = s.split_once('-') {
+        let start = a.parse().unwrap_or(0);
+        let end = b.parse().unwrap_or(usize::MAX);
+        (start, end)
+    } else {
+        let n = s.parse().unwrap_or(0);
+        (n, n)
+    }
+}
+
+fn dump(db_name: &PathBuf, session_id: &str, turns_range: Option<&str>) -> Result<()> {
+    let c = colors();
+    let db = DB::new_reader(db_name.clone()).unwrap();
+    let (_, cols) = terminal_size();
+    let separator: String = "─".repeat(cols);
+
+    let (turn_start, turn_end) = turns_range.map(parse_range).unwrap_or((0, usize::MAX));
+
+    let mut stmt = db.query(
+        "SELECT date, body, json_extract(metadata, '$.turn') as turn
+         FROM document
+         WHERE json_extract(metadata, '$.session_id') = ?1
+         ORDER BY turn",
+    )?;
+    let rows: Vec<(String, String, i64)> = stmt
+        .query_map((session_id,), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    if rows.is_empty() {
+        eprintln!("No session found for {session_id}");
+        std::process::exit(1);
+    }
+
+    let mut buf = Vec::new();
+    for (date, body, turn) in &rows {
+        let t = *turn as usize;
+        if t < turn_start || t > turn_end {
+            continue;
+        }
+        writeln!(buf, "{}{separator}{}", c.dim, c.reset)?;
+        writeln!(
+            buf,
+            "{}turn {t}{}  {}{}{}",
+            c.bold,
+            c.reset,
+            c.green,
+            format_date(date),
+            c.reset
+        )?;
+        // Skip the header chunk (first line is [project] title)
+        for line in body.lines().skip_while(|l| {
+            l.starts_with('[') && !l.starts_with("[User]") && !l.starts_with("[Claude]")
+        }) {
+            writeln!(buf, "{line}")?;
+        }
+    }
+    if !buf.is_empty() {
+        writeln!(buf, "{}{separator}{}", c.dim, c.reset)?;
+    }
+
+    use std::io::IsTerminal;
+    let output = String::from_utf8(buf)?;
+    if std::io::stdout().is_terminal() {
+        let (term_lines, _) = terminal_size();
+        let output_lines = output.lines().count();
+        if output_lines + 2 > term_lines {
+            use std::process::{Command, Stdio};
+            let mut pager = Command::new("less")
+                .args(["-RFX"])
+                .stdin(Stdio::piped())
+                .spawn()?;
+            pager.stdin.take().unwrap().write_all(output.as_bytes())?;
+            let _ = pager.wait();
+            return Ok(());
+        }
+    }
+    print!("{output}");
+    Ok(())
+}
+
 fn terminal_size() -> (usize, usize) {
     #[repr(C)]
-    struct Winsize { ws_row: u16, ws_col: u16, _xpixel: u16, _ypixel: u16 }
-    extern "C" { fn ioctl(fd: i32, request: u64, ...) -> i32; }
+    struct Winsize {
+        ws_row: u16,
+        ws_col: u16,
+        _xpixel: u16,
+        _ypixel: u16,
+    }
+    extern "C" {
+        fn ioctl(fd: i32, request: u64, ...) -> i32;
+    }
     const TIOCGWINSZ: u64 = 0x40087468;
     unsafe {
         let mut ws = std::mem::zeroed::<Winsize>();
@@ -191,11 +318,29 @@ fn main() -> Result<()> {
     let _ = log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Warn));
 
     let args: Vec<String> = env::args().skip(1).collect();
-    let do_update = args.first().is_some_and(|a| a == "--update");
-    let query_args: Vec<&str> = args.iter()
-        .filter(|a| *a != "--update")
-        .map(|s| s.as_str())
-        .collect();
+    let do_update = args.iter().any(|a| a == "--update");
+    let mut session_filter: Option<String> = None;
+    let mut dump_session: Option<String> = None;
+    let mut turns_range: Option<String> = None;
+    let mut query_args: Vec<&str> = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--update" => {}
+            "--session" => {
+                session_filter = iter.next().cloned();
+            }
+            "--dump" => {
+                dump_session = iter.next().cloned();
+            }
+            "--turns" => {
+                turns_range = iter.next().cloned();
+            }
+            _ => {
+                query_args.push(arg);
+            }
+        }
+    }
 
     let db_name = db_path();
     let assets = assets_path();
@@ -203,11 +348,17 @@ fn main() -> Result<()> {
     if do_update {
         match update(&db_name, &assets)? {
             true => {}
-            false => if query_args.is_empty() { println!("up to date") },
+            false => {
+                if query_args.is_empty() && dump_session.is_none() {
+                    println!("up to date")
+                }
+            }
         }
     }
 
-    if !query_args.is_empty() {
+    if let Some(ref sid) = dump_session {
+        dump(&db_name, sid, turns_range.as_deref())?;
+    } else if !query_args.is_empty() {
         if !do_update {
             if !db_name.exists() {
                 eprintln!("No database found. Run: pickbrain --update");
@@ -215,7 +366,9 @@ fn main() -> Result<()> {
             }
             if let Ok(meta) = std::fs::metadata(&db_name) {
                 if let Ok(modified) = meta.modified() {
-                    let age = std::time::SystemTime::now().duration_since(modified).unwrap_or_default();
+                    let age = std::time::SystemTime::now()
+                        .duration_since(modified)
+                        .unwrap_or_default();
                     if age.as_secs() > 86400 {
                         let hours = age.as_secs() / 3600;
                         eprintln!("Database is {hours}h old. Consider: pickbrain --update <query>");
@@ -224,9 +377,10 @@ fn main() -> Result<()> {
             }
         }
         let q = query_args.join(" ");
-        search(&db_name, &assets, &q)?;
+        search(&db_name, &assets, &q, session_filter.as_deref())?;
     } else if !do_update {
-        eprintln!("Usage: pickbrain [--update] <query>");
+        eprintln!("Usage: pickbrain [--update] [--session UUID] <query>");
+        eprintln!("       pickbrain --dump <UUID> [--turns N-M]");
     }
     Ok(())
 }
