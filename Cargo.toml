@@ -82,6 +82,7 @@ napi-build = "2.2.3"
 napi = ["dep:napi", "dep:napi-derive"]
 t5-quantized = []
 t5-openvino = ["dep:openvino"]
+embed-assets = []
 progress = ["dep:indicatif"]
 metal = ["dep:metal", "dep:candle-metal-kernels", "dep:ug-metal"]
 hybrid-dequant = ["dep:rayon"]

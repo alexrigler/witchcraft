@@ -34,6 +34,7 @@ use tokenizers::Tokenizer;
 use crate::embed_asset;
 embed_asset!(pub CONFIG,    "config.json");
 embed_asset!(pub TOKENIZER, "tokenizer.json");
+embed_asset!(pub MODEL,     "xtr.gguf");
 
 #[cfg(not(feature = "hybrid-dequant"))]
 fn new_qmm(in_d: usize, out_d: usize, vb: VarBuilder) -> Result<QMatMul> {
@@ -713,14 +714,14 @@ impl T5ModelBuilder {
         // CONFIG: bytes -> JSON
         let cfg_bytes = CONFIG
             .bytes(assets)
-            .map_err(|_| Error::other("failed to get decompressed bytes for CONFIG"))?;
+            .map_err(|_| Error::other("failed to get bytes for CONFIG"))?;
         let config: Config = serde_json::from_slice(cfg_bytes)
             .map_err(|e| Error::other(format!("failed to parse CONFIG as JSON: {e}")))?;
 
         // TOKENIZER: bytes -> Tokenizer
         let tok_bytes = TOKENIZER
             .bytes(assets)
-            .map_err(|_| Error::other("failed to get decompressed bytes for TOKENIZER"))?;
+            .map_err(|_| Error::other("failed to get bytes for TOKENIZER"))?;
         let tokenizer = Tokenizer::from_bytes(tok_bytes)
             .map_err(|e| Error::other(format!("failed to parse TOKENIZER: {e}")))?;
 
@@ -732,17 +733,14 @@ impl T5ModelBuilder {
         device: &Device,
         assets: &std::path::Path,
     ) -> candle_core::Result<T5EncoderModel> {
-        let model_path = assets.join("xtr.gguf");
+        let model_bytes = MODEL
+            .bytes(assets)
+            .map_err(|_| Error::other("failed to get bytes for MODEL"))?;
 
-        // TODO: Use mmap for zero-copy loading. Currently VarBuilder::from_gguf allocates
-        // Vec<u8> for each tensor and reads via read_exact(), then copies again into QStorage.
-        // Proper mmap support requires:
-        //   1. Memory-mapping the entire GGUF file (e.g. with memmap2 crate)
-        //   2. Modifying candle's QStorage to accept borrowed slices with proper lifetimes
-        //   3. Keeping the mmap Arc alive as long as tensors reference it
-        // Candle has a TODO for this in quantized/ggml_file.rs but it's not implemented yet.
-        let vb =
-            candle_transformers::quantized_var_builder::VarBuilder::from_gguf(&model_path, device)?;
+        let vb = candle_transformers::quantized_var_builder::VarBuilder::from_gguf_buffer(
+            model_bytes,
+            device,
+        )?;
 
         let enc = T5EncoderModel::load(vb, &self.config)
             .map_err(|e| Error::other(format!("failed to load T5 encoder: {e}")))?;

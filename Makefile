@@ -17,6 +17,7 @@ ifeq ($(UNAME_S),Darwin)
     RUSTFLAGS_EXTRA := -C target-feature=+avx2,+fma
     TARGET := x86_64-apple-darwin
   endif
+  PICKBRAIN_FEATURES := $(CLI_FEATURES),embed-assets
 else ifeq ($(UNAME_S),Linux)
   CLI_FEATURES := t5-quantized,fbgemm,progress
   NAPI_FEATURES := t5-quantized,fbgemm,napi
@@ -66,7 +67,7 @@ warp-cli: download
 	ln -sf target/$(TARGET)/release/warp-cli ./warp-cli
 
 pickbrain: download
-	cargo build --release $(BUILD_TARGET) --features $(CLI_FEATURES) --example pickbrain
+	cargo build --release $(BUILD_TARGET) --features $(PICKBRAIN_FEATURES) --example pickbrain
 	ln -sf target/$(TARGET)/release/examples/pickbrain ./pickbrain
 
 macintel:
