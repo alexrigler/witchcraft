@@ -70,7 +70,11 @@ make pickbrain
 
 The source lives in `examples/pickbrain.rs` and demonstrates how to use
 Witchcraft as a library: document ingestion, embedding, indexing, and hybrid
-search — all in about 400 lines of Rust.
+search. The is also a pickbrain skill you can install into and use directly
+from Claude Code, to be able to answer questions requiring global knowledge
+of all your projects:
+
+![skill](skill.png)
 
 # More build info #
 ## Feature flags ##
