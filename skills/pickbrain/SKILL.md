@@ -25,15 +25,13 @@ The binary embeds its own model weights (`embed-assets` feature), so no separate
 Run `pickbrain` via Bash with the user's query:
 
 ```bash
-pickbrain [--update] "$ARGUMENTS"
+pickbrain "$ARGUMENTS"
 ```
 
-The `--update` flag ingests any new sessions/memories before searching. Only use it when pickbrain complains
-that its database is too old.
+Pickbrain automatically ingests new sessions/memories before each search (cheap filesystem walk).
+New chunks are embedded using the same model load as the search query, so there is no extra startup cost.
 
-```bash
-pickbrain --update
-```
+Use `pickbrain --update` (without a query) to force a full ingest+embed pass.
 
 ## Interpreting Results
 
@@ -58,6 +56,6 @@ pickbrain --session <session-id> "<query>"
 
 ## Notes
 
-- First run may be slow (~7s) due to embedding. Subsequent searches are faster if the DB is fresh.
+- First run requires a full ingest+embed pass (~7s). Subsequent searches auto-ingest incrementally.
 - The database lives at `~/.claude/pickbrain.db`.
 - Results are ranked by semantic similarity — they may not contain the exact query words.

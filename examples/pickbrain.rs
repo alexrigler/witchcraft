@@ -4,7 +4,7 @@ use std::env;
 use std::io::Write;
 use std::path::PathBuf;
 
-use warp::DB;
+use warp::{DB, Embedder};
 
 struct SimpleLogger;
 impl log::Log for SimpleLogger {
@@ -32,23 +32,24 @@ fn assets_path() -> PathBuf {
     PathBuf::from(env::var("WARP_ASSETS").unwrap_or_else(|_| "assets".into()))
 }
 
-fn update(db_name: &PathBuf, assets: &PathBuf) -> Result<bool> {
+fn ingest(db_name: &PathBuf) -> Result<bool> {
     let mut db = DB::new(db_name.clone()).unwrap();
     let (sessions, memories, authored) = warp::claude_code::ingest_claude_code(&mut db)?;
     if sessions + memories + authored == 0 {
         return Ok(false);
     }
-    println!("ingested {sessions} sessions, {memories} memory files, {authored} authored files");
-
-    let device = warp::make_device();
-    let embedder = warp::Embedder::new(&device, assets)?;
-    let embedded = warp::embed_chunks(&db, &embedder, None)?;
-    if embedded > 0 {
-        println!("embedded {embedded} chunks");
-        warp::index_chunks(&db, &device)?;
-        println!("index rebuilt");
-    }
+    eprintln!("ingested {sessions} sessions, {memories} memory files, {authored} authored files");
     Ok(true)
+}
+
+fn embed_and_index(db: &DB, embedder: &Embedder, device: &candle_core::Device) -> Result<()> {
+    let embedded = warp::embed_chunks(db, embedder, None)?;
+    if embedded > 0 {
+        eprintln!("embedded {embedded} chunks");
+        warp::index_chunks(db, device)?;
+        eprintln!("index rebuilt");
+    }
+    Ok(())
 }
 
 // ANSI color helpers — disabled when stdout is not a terminal
@@ -95,6 +96,13 @@ fn search(db_name: &PathBuf, assets: &PathBuf, q: &str, session: Option<&str>) -
     let c = colors();
     let device = warp::make_device();
     let embedder = warp::Embedder::new(&device, assets)?;
+
+    // Embed any pending chunks using the already-loaded model
+    {
+        let db_rw = DB::new(db_name.clone()).unwrap();
+        embed_and_index(&db_rw, &embedder, &device)?;
+    }
+
     let mut cache = warp::EmbeddingsCache::new(1);
     let db = DB::new_reader(db_name.clone()).unwrap();
     let sql_filter = session.map(|id| SqlStatementInternal {
@@ -352,38 +360,38 @@ fn main() -> Result<()> {
     let db_name = db_path();
     let assets = assets_path();
 
-    if do_update {
-        match update(&db_name, &assets)? {
-            true => {}
-            false => {
-                if query_args.is_empty() && dump_session.is_none() {
-                    println!("up to date")
+    // Always ingest first — cheap filesystem walk with mtime watermarks
+    let has_query = !query_args.is_empty();
+    let has_dump = dump_session.is_some();
+    if has_query || has_dump || do_update {
+        match ingest(&db_name) {
+            Ok(false) => {
+                if do_update && !has_query && !has_dump {
+                    println!("up to date");
                 }
+            }
+            Ok(true) => {
+                // --update without query: do a full embed+index pass now
+                if do_update && !has_query {
+                    let device = warp::make_device();
+                    let embedder = Embedder::new(&device, &assets)?;
+                    let db_rw = DB::new(db_name.clone()).unwrap();
+                    embed_and_index(&db_rw, &embedder, &device)?;
+                }
+            }
+            Err(e) => {
+                if !db_name.exists() {
+                    eprintln!("No database found. Run: pickbrain --update");
+                    std::process::exit(1);
+                }
+                eprintln!("warning: ingest failed: {e}");
             }
         }
     }
 
     if let Some(ref sid) = dump_session {
         dump(&db_name, sid, turns_range.as_deref())?;
-    } else if !query_args.is_empty() {
-        if !do_update {
-            if !db_name.exists() {
-                eprintln!("No database found. Run: pickbrain --update");
-                std::process::exit(1);
-            }
-            if let Ok(meta) = std::fs::metadata(&db_name) {
-                if let Ok(modified) = meta.modified() {
-                    let age = std::time::SystemTime::now()
-                        .duration_since(modified)
-                        .unwrap_or_default();
-                    if age.as_secs() > 86400 {
-                        let hours = age.as_secs() / 3600;
-                        eprintln!("Database is {hours}h old. Run: pickbrain --update <query>");
-                        std::process::exit(1);
-                    }
-                }
-            }
-        }
+    } else if has_query {
         let q = query_args.join(" ");
         search(&db_name, &assets, &q, session_filter.as_deref())?;
     } else if !do_update {
