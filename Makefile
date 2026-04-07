@@ -97,7 +97,7 @@ bench:
 # === Dataset targets ===
 
 nfcorpus: warp-cli
-	rm -rf mydb.sqlite
+	rm -rf mydb.sqlite*
 	$(CLI_BIN) readcsv datasets/nfcorpus.tsv
 	$(CLI_BIN) embed
 	$(CLI_BIN) index
