@@ -62,6 +62,13 @@ fn embed_and_index(db: &DB, embedder: &Embedder, device: &candle_core::Device) -
 
 // --- Search result data ---
 
+struct TurnMeta {
+    role: String,
+    timestamp: String,
+    byte_offset: u64,
+    byte_len: u64,
+}
+
 struct SearchResult {
     timestamp: String,
     project: String,
@@ -72,8 +79,7 @@ struct SearchResult {
     source: String,
     bodies: Vec<String>,
     match_idx: usize,
-    match_role: String,
-    match_timestamp: String,
+    turns: Vec<TurnMeta>,
 }
 
 // A turn from the original JSONL session file
@@ -83,164 +89,60 @@ struct SessionTurn {
     timestamp: String,
 }
 
-fn load_session_turns(jsonl_path: &str, source: &str) -> Vec<SessionTurn> {
-    if source == "codex" {
-        return load_codex_session_turns(jsonl_path);
-    }
-    load_claude_session_turns(jsonl_path)
+fn read_jsonl_line(path: &str, offset: u64, len: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    f.seek(SeekFrom::Start(offset)).ok()?;
+    let mut buf = vec![0u8; len as usize];
+    f.read_exact(&mut buf).ok()?;
+    String::from_utf8(buf).ok()
 }
 
-fn load_claude_session_turns(jsonl_path: &str) -> Vec<SessionTurn> {
-    let raw = match std::fs::read_to_string(jsonl_path) {
-        Ok(s) => s,
-        Err(_) => return vec![],
-    };
+fn read_turn_at(path: &str, source: &str, tm: &TurnMeta) -> Option<SessionTurn> {
+    let line = read_jsonl_line(path, tm.byte_offset, tm.byte_len)?;
+    let v: serde_json::Value = serde_json::from_str(&line).ok()?;
 
-    #[derive(serde::Deserialize)]
-    struct Entry {
-        #[serde(rename = "type")]
-        entry_type: String,
-        timestamp: Option<String>,
-        message: Option<Msg>,
-        #[serde(default, rename = "isMeta")]
-        is_meta: bool,
-    }
-    #[derive(serde::Deserialize)]
-    struct Msg {
-        role: Option<String>,
-        content: Option<MsgContent>,
-    }
-    #[derive(serde::Deserialize)]
-    #[serde(untagged)]
-    enum MsgContent {
-        Text(String),
-        Blocks(Vec<Block>),
-    }
-    #[derive(serde::Deserialize)]
-    struct Block {
-        #[serde(rename = "type")]
-        block_type: String,
-        #[serde(default)]
-        text: Option<String>,
-    }
-
-    let mut turns = Vec::new();
-    for line in raw.lines() {
-        let entry: Entry = match serde_json::from_str(line) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if entry.entry_type != "user" && entry.entry_type != "assistant" {
-            continue;
+    let text = if source == "codex" {
+        let payload = v.get("payload")?;
+        let ptype = payload.get("type")?.as_str()?;
+        if ptype == "message" && payload.get("role")?.as_str()? == "user" {
+            let content = payload.get("content")?.as_array()?;
+            let texts: Vec<&str> = content
+                .iter()
+                .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("input_text"))
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect();
+            texts.join("\n")
+        } else if ptype == "agent_reasoning" {
+            payload.get("text")?.as_str()?.to_string()
+        } else {
+            return None;
         }
-        if entry.is_meta {
-            continue;
-        }
-        let msg = match entry.message {
-            Some(m) => m,
-            None => continue,
-        };
-        let role = match msg.role {
-            Some(r) if r == "user" || r == "assistant" => r,
-            _ => continue,
-        };
-        let text = match msg.content {
-            Some(MsgContent::Text(t)) => t,
-            Some(MsgContent::Blocks(blocks)) => {
+    } else {
+        // Claude Code
+        let msg = v.get("message")?;
+        match msg.get("content")? {
+            c if c.is_string() => c.as_str()?.to_string(),
+            c if c.is_array() => {
+                let blocks = c.as_array()?;
                 blocks
                     .iter()
-                    .filter(|b| b.block_type == "text")
-                    .filter_map(|b| b.text.as_deref())
+                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
                     .collect::<Vec<_>>()
                     .join("\n")
             }
-            None => continue,
-        };
-        let trimmed = text.trim();
-        if trimmed.is_empty()
-            || trimmed.starts_with("<command-")
-            || trimmed.starts_with("<local-command-")
-        {
-            continue;
+            _ => return None,
         }
-        let clean = regex::Regex::new(r"<[^>]+>")
-            .map(|re| re.replace_all(&text, "").to_string())
-            .unwrap_or(text);
-        let clean = clean.trim().to_string();
-        if clean.is_empty() {
-            continue;
-        }
-        turns.push(SessionTurn {
-            role,
-            text: clean,
-            timestamp: entry.timestamp.unwrap_or_default(),
-        });
-    }
-    turns
-}
-
-fn load_codex_session_turns(jsonl_path: &str) -> Vec<SessionTurn> {
-    let raw = match std::fs::read_to_string(jsonl_path) {
-        Ok(s) => s,
-        Err(_) => return vec![],
     };
 
-    let re_xml = regex::Regex::new(r"<[^>]+>").unwrap();
-    let mut turns = Vec::new();
-
-    for line in raw.lines() {
-        let v: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let timestamp = v.get("timestamp").and_then(|t| t.as_str()).unwrap_or_default().to_string();
-        let entry_type = v.get("type").and_then(|t| t.as_str()).unwrap_or_default();
-        let payload = match v.get("payload") {
-            Some(p) => p,
-            None => continue,
-        };
-
-        if entry_type == "response_item" {
-            let ptype = payload.get("type").and_then(|t| t.as_str()).unwrap_or_default();
-            if ptype == "message" && payload.get("role").and_then(|r| r.as_str()) == Some("user") {
-                let content = match payload.get("content").and_then(|c| c.as_array()) {
-                    Some(c) => c,
-                    None => continue,
-                };
-                let text: String = content
-                    .iter()
-                    .filter(|b| b.get("type").and_then(|t| t.as_str()) == Some("input_text"))
-                    .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let clean = re_xml.replace_all(&text, "").trim().to_string();
-                if clean.is_empty() {
-                    continue;
-                }
-                turns.push(SessionTurn {
-                    role: "user".to_string(),
-                    text: clean,
-                    timestamp,
-                });
-            }
-        } else if entry_type == "event_msg" {
-            let ptype = payload.get("type").and_then(|t| t.as_str()).unwrap_or_default();
-            if ptype == "agent_reasoning" {
-                if let Some(text) = payload.get("text").and_then(|t| t.as_str()) {
-                    let clean = text.trim().to_string();
-                    if !clean.is_empty() {
-                        turns.push(SessionTurn {
-                            role: "assistant".to_string(),
-                            text: clean,
-                            timestamp,
-                        });
-                    }
-                }
-            }
-        }
-    }
-    turns
+    Some(SessionTurn {
+        role: tm.role.clone(),
+        text,
+        timestamp: tm.timestamp.clone(),
+    })
 }
+
 
 fn run_search(
     db_name: &PathBuf,
@@ -287,7 +189,19 @@ fn run_search(
         .map(|(_score, metadata, bodies, sub_idx, date)| {
             let meta: serde_json::Value = serde_json::from_str(&metadata).unwrap_or_default();
             let idx = (sub_idx as usize).min(bodies.len().saturating_sub(1));
-            let turn_meta = if idx > 0 { &meta["turns"][idx - 1] } else { &meta["turns"][0] };
+            let turns_arr: Vec<TurnMeta> = meta["turns"]
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .map(|v| TurnMeta {
+                            role: v["role"].as_str().unwrap_or("").to_string(),
+                            timestamp: v["timestamp"].as_str().unwrap_or("").to_string(),
+                            byte_offset: v["off"].as_u64().unwrap_or(0),
+                            byte_len: v["len"].as_u64().unwrap_or(0),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             SearchResult {
                 timestamp: format_date(&date),
                 project: meta["project"].as_str().unwrap_or("").to_string(),
@@ -298,8 +212,7 @@ fn run_search(
                 source: meta["source"].as_str().unwrap_or("claude").to_string(),
                 bodies,
                 match_idx: idx,
-                match_role: turn_meta["role"].as_str().unwrap_or("").to_string(),
-                match_timestamp: turn_meta["timestamp"].as_str().unwrap_or("").to_string(),
+                turns: turns_arr,
             }
         })
         .collect();
@@ -349,8 +262,14 @@ fn search_tui(
     let mut scroll_offset: u16 = 0;
     let mut resume_session: Option<(String, String, String)> = None;
     let mut confirm_resume: Option<(String, String, String, String)> = None;
-    // Cache loaded session turns so we don't re-read the JSONL on every frame
-    let mut detail_cache: Option<(usize, Vec<SessionTurn>)> = None;
+    // Windowed detail cache: (result_idx, loaded turns, index of first loaded turn in r.turns, highlighted turn index in r.turns)
+    struct DetailWindow {
+        result_idx: usize,
+        turns: Vec<SessionTurn>,
+        start: usize,  // index into r.turns of first loaded turn
+        highlight: usize, // index into r.turns of matched turn
+    }
+    let mut detail_cache: Option<DetailWindow> = None;
 
     loop {
         terminal.draw(|f| {
@@ -429,11 +348,15 @@ fn search_tui(
                             };
                             let raw_preview = first_line(&r.bodies[preview_idx]);
                             let preview = strip_body_prefix(&raw_preview);
-                            let ts = if !r.match_timestamp.is_empty() {
-                                format_date(&r.match_timestamp)
+                            let matched_tm = if r.match_idx > 0 {
+                                r.turns.get(r.match_idx - 1)
                             } else {
-                                r.timestamp.clone()
+                                r.turns.first()
                             };
+                            let ts = matched_tm
+                                .filter(|tm| !tm.timestamp.is_empty())
+                                .map(|tm| format_date(&tm.timestamp))
+                                .unwrap_or_else(|| r.timestamp.clone());
                             let mut meta_spans = vec![
                                 Span::styled(
                                     format!("{ts} "),
@@ -467,9 +390,10 @@ fn search_tui(
                                     Style::default().fg(Color::DarkGray),
                                 ));
                             }
-                            let role_prefix = if r.match_role == "user" {
+                            let match_role = matched_tm.map(|tm| tm.role.as_str()).unwrap_or("");
+                            let role_prefix = if match_role == "user" {
                                 "[User] "
-                            } else if r.match_role == "assistant" {
+                            } else if match_role == "assistant" {
                                 if r.source == "codex" { "[Codex] " } else { "[Claude] " }
                             } else {
                                 ""
@@ -479,7 +403,7 @@ fn search_tui(
                                 Line::from(vec![
                                     Span::styled(
                                         format!("  {role_prefix}"),
-                                        Style::default().fg(if r.match_role == "user" {
+                                        Style::default().fg(if match_role == "user" {
                                             Color::Rgb(0, 255, 0)
                                         } else {
                                             Color::Cyan
@@ -523,23 +447,21 @@ fn search_tui(
                     lines.push(Line::from(""));
 
                     // If we have a JSONL path and a session, show the real conversation
-                    let turns = detail_cache
+                    let dw = detail_cache
                         .as_ref()
-                        .filter(|(ci, _)| *ci == idx)
-                        .map(|(_, t)| t.as_slice());
+                        .filter(|dw| dw.result_idx == idx);
 
-                    if let Some(turns) = turns {
-                        let (inter_start, inter_end) =
-                            interaction_turn_range(turns, r.turn as usize);
-                        // sub_idx 0 = header, 1+ = turn within interaction
-                        let highlighted = if r.match_idx > 0 {
-                            inter_start + r.match_idx - 1
-                        } else {
-                            inter_start
-                        };
-                        for (i, turn) in turns.iter().enumerate() {
-                            let is_highlight = i == highlighted;
-                            let in_interaction = i >= inter_start && i < inter_end;
+                    if let Some(dw) = dw {
+                        if dw.start > 0 {
+                            lines.push(Line::styled(
+                                format!("  ... {} earlier turns ...", dw.start),
+                                Style::default().fg(Color::DarkGray),
+                            ));
+                            lines.push(Line::from(""));
+                        }
+                        for (i, turn) in dw.turns.iter().enumerate() {
+                            let turn_idx = dw.start + i;
+                            let is_highlight = turn_idx == dw.highlight;
                             let role_style = if turn.role == "user" {
                                 Style::default()
                                     .fg(Color::Rgb(0, 255, 0))
@@ -548,13 +470,6 @@ fn search_tui(
                                 Style::default()
                                     .fg(Color::Cyan)
                                     .add_modifier(Modifier::BOLD)
-                            };
-                            let role_style = if !in_interaction {
-                                Style::default()
-                                    .fg(Color::DarkGray)
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                role_style
                             };
                             lines.push(Line::from(vec![
                                 Span::styled(
@@ -574,8 +489,6 @@ fn search_tui(
                             ]));
                             let text_style = if is_highlight {
                                 Style::default().fg(Color::White)
-                            } else if in_interaction {
-                                Style::default()
                             } else {
                                 Style::default().fg(Color::DarkGray)
                             };
@@ -583,6 +496,13 @@ fn search_tui(
                                 lines.push(Line::styled(format!("  {line}"), text_style));
                             }
                             lines.push(Line::from(""));
+                        }
+                        let remaining = r.turns.len().saturating_sub(dw.start + dw.turns.len());
+                        if remaining > 0 {
+                            lines.push(Line::styled(
+                                format!("  ... {remaining} later turns ..."),
+                                Style::default().fg(Color::DarkGray),
+                            ));
                         }
                     } else {
                         // Fallback: show indexed bodies (for .md files etc.)
@@ -651,27 +571,23 @@ fn search_tui(
                 }
                 (View::List, KeyCode::Enter, _) => {
                     let r = &results[selected];
-                    if !r.session_id.is_empty() && !r.path.is_empty() {
-                        let turns = load_session_turns(&r.path, &r.source);
-                        // Scroll to the matched turn
-                        let (inter_start, _) =
-                            interaction_turn_range(&turns, r.turn as usize);
-                        let highlighted = if r.match_idx > 0 {
-                            inter_start + r.match_idx - 1
-                        } else {
-                            inter_start
-                        };
-                        let mut line_count: u16 = 3; // session header lines
-                        for (i, turn) in turns.iter().enumerate() {
-                            if i >= highlighted {
-                                break;
+                    if !r.session_id.is_empty() && !r.path.is_empty() && !r.turns.is_empty() {
+                        let mi = if r.match_idx > 0 { r.match_idx - 1 } else { 0 };
+                        let start = mi.saturating_sub(2);
+                        let end = (mi + 9).min(r.turns.len());
+                        let mut turns = Vec::new();
+                        for i in start..end {
+                            if let Some(turn) = read_turn_at(&r.path, &r.source, &r.turns[i]) {
+                                turns.push(turn);
                             }
-                            line_count += 1; // role header
-                            line_count += turn.text.lines().count() as u16;
-                            line_count += 1; // blank line
                         }
-                        scroll_offset = line_count.saturating_sub(2);
-                        detail_cache = Some((selected, turns));
+                        scroll_offset = 0;
+                        detail_cache = Some(DetailWindow {
+                            result_idx: selected,
+                            turns,
+                            start,
+                            highlight: mi,
+                        });
                     } else {
                         scroll_offset = 0;
                         detail_cache = None;
@@ -679,26 +595,30 @@ fn search_tui(
                     view = View::Detail(selected);
                 }
 
-                // Detail view
-                (View::Detail(_), KeyCode::Down | KeyCode::Char('j'), _) => {
+                // Detail view: j/k scroll and extend window at edges
+                (View::Detail(idx), KeyCode::Down | KeyCode::Char('j'), _) => {
+                    if let Some(ref mut dw) = detail_cache {
+                        let r = &results[*idx];
+                        let loaded_end = dw.start + dw.turns.len();
+                        if loaded_end < r.turns.len() {
+                            if let Some(turn) = read_turn_at(&r.path, &r.source, &r.turns[loaded_end]) {
+                                dw.turns.push(turn);
+                            }
+                        }
+                    }
                     scroll_offset = scroll_offset.saturating_add(1);
                 }
-                (View::Detail(_), KeyCode::Up | KeyCode::Char('k'), _) => {
+                (View::Detail(idx), KeyCode::Up | KeyCode::Char('k'), _) => {
+                    if let Some(ref mut dw) = detail_cache {
+                        if dw.start > 0 {
+                            let r = &results[*idx];
+                            dw.start -= 1;
+                            if let Some(turn) = read_turn_at(&r.path, &r.source, &r.turns[dw.start]) {
+                                dw.turns.insert(0, turn);
+                            }
+                        }
+                    }
                     scroll_offset = scroll_offset.saturating_sub(1);
-                }
-                (View::Detail(_), KeyCode::PageDown | KeyCode::Char(' '), _) => {
-                    scroll_offset = scroll_offset.saturating_add(20);
-                }
-                (View::Detail(_), KeyCode::PageUp, _) => {
-                    scroll_offset = scroll_offset.saturating_sub(20);
-                }
-                (View::Detail(_), KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                    let half = terminal.size().map(|s| s.height / 2).unwrap_or(10);
-                    scroll_offset = scroll_offset.saturating_add(half);
-                }
-                (View::Detail(_), KeyCode::Char('u'), KeyModifiers::CONTROL) => {
-                    let half = terminal.size().map(|s| s.height / 2).unwrap_or(10);
-                    scroll_offset = scroll_offset.saturating_sub(half);
                 }
                 (View::Detail(idx), KeyCode::Char('r'), _) => {
                     let r = &results[*idx];
@@ -772,20 +692,6 @@ fn launch_resume(session_id: &str, jsonl_path: &str, source: &str) -> Result<()>
     }
 }
 
-fn interaction_turn_range(turns: &[SessionTurn], interaction_idx: usize) -> (usize, usize) {
-    let user_starts: Vec<usize> = turns
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| t.role == "user")
-        .map(|(i, _)| i)
-        .collect();
-    let start = user_starts.get(interaction_idx).copied().unwrap_or(0);
-    let end = user_starts
-        .get(interaction_idx + 1)
-        .copied()
-        .unwrap_or(turns.len());
-    (start, end)
-}
 
 fn strip_body_prefix(s: &str) -> &str {
     s.strip_prefix("[User] ")
@@ -824,26 +730,52 @@ fn search_plain(
     writeln!(buf, "search completed in {search_ms} ms\n")?;
     for r in &results {
         writeln!(buf, "---")?;
+        // match_idx 0 = header, turns[0] = first turn → turns[match_idx - 1]
+        let matched_tm = if r.match_idx > 0 {
+            r.turns.get(r.match_idx - 1)
+        } else {
+            r.turns.first()
+        };
+        let ts = matched_tm
+            .filter(|tm| !tm.timestamp.is_empty())
+            .map(|tm| format_date(&tm.timestamp))
+            .unwrap_or_else(|| r.timestamp.clone());
+        let source_label = if r.source == "codex" { "codex" } else { "claude" };
         let filename = if r.path.ends_with(".md") {
             format!("  {}", r.path)
         } else {
             String::new()
         };
-        writeln!(buf, "{}  {}{filename}", r.timestamp, r.project)?;
+        writeln!(buf, "{ts}  {}{filename}", r.project)?;
         if !r.session_id.is_empty() {
-            writeln!(buf, "  {} turn {}", r.session_id, r.turn)?;
+            writeln!(buf, "  {source_label} {} turn {}", r.session_id, r.turn)?;
         }
-        let idx = r.match_idx;
-        if idx > 0 {
-            for line in r.bodies[idx - 1].lines().filter(|l| !l.is_empty()) {
-                writeln!(buf, "  {line}")?;
+        if !r.session_id.is_empty() && !r.path.is_empty() && !r.turns.is_empty() {
+            // Read only the matched turn + neighbors via byte offsets
+            let mi = if r.match_idx > 0 { r.match_idx - 1 } else { 0 };
+            let ctx_start = mi.saturating_sub(1);
+            let ctx_end = (mi + 2).min(r.turns.len());
+            for i in ctx_start..ctx_end {
+                let tm = &r.turns[i];
+                let label = if tm.role == "user" {
+                    "[User]"
+                } else if r.source == "codex" {
+                    "[Codex]"
+                } else {
+                    "[Claude]"
+                };
+                let prefix = if i == mi { ">>>" } else { "  " };
+                writeln!(buf, "{prefix} {label} {}", format_date(&tm.timestamp))?;
+                if let Some(turn) = read_turn_at(&r.path, &r.source, tm) {
+                    for line in turn.text.lines().take(10) {
+                        writeln!(buf, "{prefix}   {line}")?;
+                    }
+                }
             }
-        }
-        for line in r.bodies[idx].lines().filter(|l| !l.is_empty()) {
-            writeln!(buf, "  {line}")?;
-        }
-        if idx + 1 < r.bodies.len() {
-            for line in r.bodies[idx + 1].lines().filter(|l| !l.is_empty()) {
+        } else {
+            // Fallback for .md files etc: use indexed bodies
+            let idx = r.match_idx;
+            for line in r.bodies[idx].lines().filter(|l| !l.is_empty()) {
                 writeln!(buf, "  {line}")?;
             }
         }

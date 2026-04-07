@@ -30,6 +30,8 @@ struct Chunk {
     text: String,
     timestamp: String,
     ts_ms: i64,
+    byte_offset: u64,
+    byte_len: u64,
 }
 
 fn codepoint_len(s: &str) -> usize {
@@ -96,8 +98,11 @@ fn parse_session_file(path: &Path) -> (Option<String>, Vec<Chunk>) {
 
     let mut cwd = None;
     let mut chunks = Vec::new();
+    let mut offset: u64 = 0;
 
     for line in raw.lines() {
+        let line_offset = offset;
+        offset += line.len() as u64 + 1; // +1 for newline
         if line.trim().is_empty() {
             continue;
         }
@@ -154,6 +159,8 @@ fn parse_session_file(path: &Path) -> (Option<String>, Vec<Chunk>) {
             text,
             timestamp,
             ts_ms,
+            byte_offset: line_offset,
+            byte_len: line.len() as u64,
         });
     }
 
@@ -224,6 +231,8 @@ fn ingest_session(db: &mut DB, path: &Path, mtime_ms: i64) -> Result<usize> {
             turns_meta.push(serde_json::json!({
                 "role": chunk.role,
                 "timestamp": chunk.timestamp,
+                "off": chunk.byte_offset,
+                "len": chunk.byte_len,
             }));
         }
 
