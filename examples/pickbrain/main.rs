@@ -53,9 +53,7 @@ fn ingest(db_name: &PathBuf) -> Result<bool> {
 fn embed_and_index(db: &DB, embedder: &Embedder, device: &candle_core::Device) -> Result<()> {
     let embedded = witchcraft::embed_chunks(db, embedder, None)?;
     if embedded > 0 {
-        eprintln!("embedded {embedded} chunks");
         witchcraft::index_chunks(db, device)?;
-        eprintln!("index rebuilt");
     }
     Ok(())
 }
@@ -259,17 +257,15 @@ fn search_tui(
     let mut selected: usize = 0;
     let mut list_state = ListState::default();
     list_state.select(Some(0));
-    let mut scroll_offset: u16 = 0;
+    let mut scroll_offset: usize = 0;
     let mut resume_session: Option<(String, String, String)> = None;
     let mut confirm_resume: Option<(String, String, String, String)> = None;
-    // Windowed detail cache: (result_idx, loaded turns, index of first loaded turn in r.turns, highlighted turn index in r.turns)
-    struct DetailWindow {
+    struct DetailState {
         result_idx: usize,
         turns: Vec<SessionTurn>,
-        start: usize,  // index into r.turns of first loaded turn
-        highlight: usize, // index into r.turns of matched turn
+        highlight: usize,
     }
-    let mut detail_cache: Option<DetailWindow> = None;
+    let mut detail_cache: Option<DetailState> = None;
 
     loop {
         terminal.draw(|f| {
@@ -452,16 +448,8 @@ fn search_tui(
                         .filter(|dw| dw.result_idx == idx);
 
                     if let Some(dw) = dw {
-                        if dw.start > 0 {
-                            lines.push(Line::styled(
-                                format!("  ... {} earlier turns ...", dw.start),
-                                Style::default().fg(Color::DarkGray),
-                            ));
-                            lines.push(Line::from(""));
-                        }
                         for (i, turn) in dw.turns.iter().enumerate() {
-                            let turn_idx = dw.start + i;
-                            let is_highlight = turn_idx == dw.highlight;
+                            let is_highlight = i == dw.highlight;
                             let role_style = if turn.role == "user" {
                                 Style::default()
                                     .fg(Color::Rgb(0, 255, 0))
@@ -497,13 +485,6 @@ fn search_tui(
                             }
                             lines.push(Line::from(""));
                         }
-                        let remaining = r.turns.len().saturating_sub(dw.start + dw.turns.len());
-                        if remaining > 0 {
-                            lines.push(Line::styled(
-                                format!("  ... {remaining} later turns ..."),
-                                Style::default().fg(Color::DarkGray),
-                            ));
-                        }
                     } else {
                         // Fallback: show indexed bodies (for .md files etc.)
                         for (i, chunk) in r.bodies.iter().enumerate() {
@@ -521,7 +502,7 @@ fn search_tui(
 
                     let detail = Paragraph::new(lines)
                         .wrap(Wrap { trim: false })
-                        .scroll((scroll_offset, 0));
+                        .scroll((scroll_offset as u16, 0));
                     f.render_widget(detail, chunks[1]);
                 }
             }
@@ -573,19 +554,21 @@ fn search_tui(
                     let r = &results[selected];
                     if !r.session_id.is_empty() && !r.path.is_empty() && !r.turns.is_empty() {
                         let mi = if r.match_idx > 0 { r.match_idx - 1 } else { 0 };
-                        let start = mi.saturating_sub(2);
-                        let end = (mi + 9).min(r.turns.len());
                         let mut turns = Vec::new();
-                        for i in start..end {
-                            if let Some(turn) = read_turn_at(&r.path, &r.source, &r.turns[i]) {
+                        for tm in &r.turns {
+                            if let Some(turn) = read_turn_at(&r.path, &r.source, tm) {
                                 turns.push(turn);
                             }
                         }
-                        scroll_offset = 0;
-                        detail_cache = Some(DetailWindow {
+                        // Position viewport at the highlight turn
+                        let mut pre_lines: usize = if r.session_id.is_empty() { 2 } else { 3 };
+                        for t in &turns[..mi.min(turns.len())] {
+                            pre_lines += 2 + t.text.lines().count();
+                        }
+                        scroll_offset = pre_lines;
+                        detail_cache = Some(DetailState {
                             result_idx: selected,
                             turns,
-                            start,
                             highlight: mi,
                         });
                     } else {
@@ -595,29 +578,11 @@ fn search_tui(
                     view = View::Detail(selected);
                 }
 
-                // Detail view: j/k scroll and extend window at edges
-                (View::Detail(idx), KeyCode::Down | KeyCode::Char('j'), _) => {
-                    if let Some(ref mut dw) = detail_cache {
-                        let r = &results[*idx];
-                        let loaded_end = dw.start + dw.turns.len();
-                        if loaded_end < r.turns.len() {
-                            if let Some(turn) = read_turn_at(&r.path, &r.source, &r.turns[loaded_end]) {
-                                dw.turns.push(turn);
-                            }
-                        }
-                    }
+                // Detail view: j/k line scroll
+                (View::Detail(_), KeyCode::Down | KeyCode::Char('j'), _) => {
                     scroll_offset = scroll_offset.saturating_add(1);
                 }
-                (View::Detail(idx), KeyCode::Up | KeyCode::Char('k'), _) => {
-                    if let Some(ref mut dw) = detail_cache {
-                        if dw.start > 0 {
-                            let r = &results[*idx];
-                            dw.start -= 1;
-                            if let Some(turn) = read_turn_at(&r.path, &r.source, &r.turns[dw.start]) {
-                                dw.turns.insert(0, turn);
-                            }
-                        }
-                    }
+                (View::Detail(_), KeyCode::Up | KeyCode::Char('k'), _) => {
                     scroll_offset = scroll_offset.saturating_sub(1);
                 }
                 (View::Detail(idx), KeyCode::Char('r'), _) => {
@@ -746,10 +711,12 @@ fn search_plain(
         } else {
             String::new()
         };
-        writeln!(buf, "{ts}  {}{filename}", r.project)?;
-        if !r.session_id.is_empty() {
-            writeln!(buf, "  {source_label} {} turn {}", r.session_id, r.turn)?;
-        }
+        let session_info = if !r.session_id.is_empty() {
+            format!("  {source_label} {} turn {}", r.session_id, r.turn)
+        } else {
+            String::new()
+        };
+        writeln!(buf, "{ts}  {}{filename}{session_info}", r.project)?;
         if !r.session_id.is_empty() && !r.path.is_empty() && !r.turns.is_empty() {
             // Read only the matched turn + neighbors via byte offsets
             let mi = if r.match_idx > 0 { r.match_idx - 1 } else { 0 };
