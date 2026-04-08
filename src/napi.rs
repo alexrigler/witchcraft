@@ -496,7 +496,7 @@ impl WarpInner {
         threshold: f32,
         top_k: usize,
         sql_filter: Option<&crate::types::SqlStatementInternal>,
-    ) -> Vec<(f32, String, String, u32)> {
+    ) -> Vec<(f32, String, Vec<String>, u32, String)> {
         self.embedder
             .as_ref()
             .and_then(|embedder| self.db.as_ref().map(|db| (embedder, db)))
@@ -624,7 +624,6 @@ pub struct Warp {
 impl Warp {
     #[napi(constructor)]
     pub fn new(db_name: String, assets: String) -> Self {
-        let cwd = std::env::current_dir().unwrap();
         info!("warp running");
         let indexer = Indexer::global(db_name.clone(), assets.clone());
         Self {
