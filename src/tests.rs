@@ -99,7 +99,7 @@ mod tests {
                         assert!(results.len() == 0);
                     }
                 }
-                for (score, metadata, body, body_idx, _chunk) in results {
+                for (score, metadata, body, body_idx, _date) in results {
                     let uuid = Uuid::parse_str(&metadata).unwrap();
                     let index = uuids.iter().position(|&u| u == uuid).unwrap();
                     println!("i={i} score={score} metadata={metadata} body={body:?} body_idx={body_idx} uuid-index {index}");
@@ -166,7 +166,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            for (_score, _metadata, _body, body_idx, _chunk) in results {
+            for (_score, _metadata, _body, body_idx, _date) in results {
                 assert!(body_idx == pos);
             }
         }
@@ -182,7 +182,7 @@ mod tests {
                 None,
             )
             .unwrap();
-            for (_score, _metadata, _body, body_idx, _chunk) in results {
+            for (_score, _metadata, _body, body_idx, _date) in results {
                 assert!(body_idx == pos);
             }
         }
@@ -496,6 +496,54 @@ mod tests {
         let metadata: String = db.query("SELECT metadata FROM document WHERE uuid = ?1")?
             .query_row((uuid1.to_string(),), |row| row.get(0))?;
         assert!(metadata.contains("one-updated"));
+
+        db.clear();
+        db.shutdown();
+        Ok(())
+    }
+
+    #[test]
+    fn test_search_with_uuid_filter() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let path = dir.path().join("filter_test.sqlite");
+        let assets = PathBuf::from("assets");
+        let device = crate::make_device();
+        let embedder = crate::Embedder::new(&device, &assets)?;
+        let mut cache = crate::EmbeddingsCache::new(4);
+
+        let mut db = DB::new(path.clone())?;
+
+        // Insert two documents that would both match "flamingos"
+        let uuid_a = Uuid::new_v5(&Uuid::NAMESPACE_OID, b"filter-a");
+        let uuid_b = Uuid::new_v5(&Uuid::NAMESPACE_OID, b"filter-b");
+        db.add_doc(&uuid_a, None, &uuid_a.to_string(), "A group of flamingos is called a flamboyance", None)?;
+        db.add_doc(&uuid_b, None, &uuid_b.to_string(), "Flamingos are pink because of their diet of shrimp and algae", None)?;
+
+        crate::embed_chunks(&db, &embedder, None)?;
+        crate::index_chunks(&db, &device)?;
+
+        // Unfiltered search should return both
+        let results = crate::search(
+            &db, &embedder, &mut cache, "flamingos", THRESHOLD, 10, false, None,
+        )?;
+        assert!(results.len() == 2, "unfiltered search should find both flamingo docs, got {}", results.len());
+
+        // Filtered search: only uuid_b
+        let filter = crate::types::SqlStatementInternal {
+            statement_type: crate::types::SqlStatementType::Condition,
+            condition: Some(crate::types::SqlConditionInternal {
+                key: "uuid".to_string(),
+                operator: crate::types::SqlOperator::Equals,
+                value: Some(crate::types::SqlValue::String(uuid_b.to_string())),
+            }),
+            logic: None,
+            statements: None,
+        };
+        let results = crate::search(
+            &db, &embedder, &mut cache, "flamingos", THRESHOLD, 10, false, Some(&filter),
+        )?;
+        assert!(results.len() == 1, "filtered search should find exactly one doc, got {}", results.len());
+        assert_eq!(results[0].1, uuid_b.to_string(), "filtered result should be uuid_b");
 
         db.clear();
         db.shutdown();
