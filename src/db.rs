@@ -26,6 +26,11 @@ impl DB {
         self.recreated
     }
 
+    pub fn set_mmap_size(&self, bytes: i64) -> SQLResult<()> {
+        self.conn().pragma_update(None, "mmap_size", bytes)?;
+        Ok(())
+    }
+
     pub fn new_reader(db_fn: PathBuf) -> SQLResult<Self> {
         let connection =
             Connection::open_with_flags(db_fn.clone(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
