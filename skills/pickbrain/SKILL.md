@@ -28,10 +28,7 @@ Run `pickbrain` via Bash with the user's query:
 pickbrain "$ARGUMENTS"
 ```
 
-Pickbrain automatically ingests new sessions/memories before each search (cheap filesystem walk).
-New chunks are embedded using the same model load as the search query, so there is no extra startup cost.
-
-Use `pickbrain --update` (without a query) to force a full ingest+embed pass.
+Pickbrain automatically ingests new sessions, memories, and project config files (CLAUDE.md, AGENTS.md, and their @ references) before each search.
 
 ## Interpreting Results
 

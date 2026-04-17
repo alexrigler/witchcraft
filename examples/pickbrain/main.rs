@@ -40,15 +40,15 @@ fn assets_path() -> PathBuf {
 
 fn ingest(db_name: &PathBuf) -> Result<bool> {
     let mut db = DB::new(db_name.clone()).unwrap();
-    let (sessions, memories, authored) = claude_code::ingest_claude_code(&mut db)?;
+    let (sessions, memories, authored, configs) = claude_code::ingest_claude_code(&mut db)?;
     let codex_sessions = codex::ingest_codex(&mut db)?;
-    let total = sessions + memories + authored + codex_sessions;
+    let total = sessions + memories + authored + configs + codex_sessions;
     if total == 0 {
         eprintln!("No new sessions to ingest.");
         return Ok(false);
     }
     eprintln!(
-        "ingested {sessions} claude sessions, {codex_sessions} codex sessions, {memories} memory files, {authored} authored files"
+        "ingested {sessions} claude sessions, {codex_sessions} codex sessions, {memories} memory files, {authored} authored files, {configs} config files"
     );
     Ok(true)
 }
