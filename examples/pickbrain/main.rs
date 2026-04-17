@@ -145,12 +145,27 @@ fn read_turn_at(path: &str, source: &str, tm: &TurnMeta) -> Option<SessionTurn> 
 }
 
 
+/// Parse a duration string like "24h", "7d", "2w" into milliseconds.
+fn parse_since(s: &str) -> Option<i64> {
+    let s = s.trim();
+    let (num_str, unit) = s.split_at(s.len().saturating_sub(1));
+    let n: i64 = num_str.parse().ok()?;
+    let ms_per_unit = match unit {
+        "h" => 3_600_000,
+        "d" => 86_400_000,
+        "w" => 604_800_000,
+        _ => return None,
+    };
+    Some(n * ms_per_unit)
+}
+
 fn run_search(
     db_name: &PathBuf,
     assets: &PathBuf,
     q: &str,
     session: Option<&str>,
     exclude: &[String],
+    since_ms: Option<i64>,
 ) -> Result<(Vec<SearchResult>, u128)> {
     use witchcraft::types::*;
     let device = witchcraft::make_device();
@@ -194,16 +209,40 @@ fn run_search(
         })
     };
 
-    let sql_filter = match (session_filter, exclude_filter) {
-        (Some(s), Some(e)) => Some(SqlStatementInternal {
+    let since_filter = since_ms.map(|ms| {
+        let cutoff_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64
+            - ms / 1000;
+        let cutoff_dt = chrono::DateTime::from_timestamp(cutoff_secs, 0).unwrap();
+        let cutoff_iso = cutoff_dt.to_rfc3339();
+        SqlStatementInternal {
+            statement_type: SqlStatementType::Condition,
+            condition: Some(SqlConditionInternal {
+                key: "date".to_string(),
+                operator: SqlOperator::GreaterThanOrEquals,
+                value: Some(SqlValue::String(cutoff_iso)),
+            }),
+            logic: None,
+            statements: None,
+        }
+    });
+
+    let filters: Vec<SqlStatementInternal> = [session_filter, exclude_filter, since_filter]
+        .into_iter()
+        .flatten()
+        .collect();
+
+    let sql_filter = match filters.len() {
+        0 => None,
+        1 => Some(filters.into_iter().next().unwrap()),
+        _ => Some(SqlStatementInternal {
             statement_type: SqlStatementType::Group,
             condition: None,
             logic: Some(SqlLogic::And),
-            statements: Some(vec![s, e]),
+            statements: Some(filters),
         }),
-        (Some(s), None) => Some(s),
-        (None, Some(e)) => Some(e),
-        (None, None) => None,
     };
     let now = std::time::Instant::now();
     let results = witchcraft::search(
@@ -266,8 +305,9 @@ fn search_tui(
     q: &str,
     session: Option<&str>,
     exclude: &[String],
+    since_ms: Option<i64>,
 ) -> Result<Option<(String, String, String)>> {
-    let (results, search_ms) = run_search(db_name, assets, q, session, exclude)?;
+    let (results, search_ms) = run_search(db_name, assets, q, session, exclude, since_ms)?;
     if results.is_empty() {
         eprintln!("no results");
         return Ok(None);
@@ -725,8 +765,9 @@ fn search_plain(
     q: &str,
     session: Option<&str>,
     exclude: &[String],
+    since_ms: Option<i64>,
 ) -> Result<()> {
-    let (results, search_ms) = run_search(db_name, assets, q, session, exclude)?;
+    let (results, search_ms) = run_search(db_name, assets, q, session, exclude, since_ms)?;
 
     let mut buf = Vec::new();
     writeln!(buf, "\n[[ {q} ]]")?;
@@ -887,6 +928,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut session_filter: Option<String> = None;
     let mut exclude_sessions: Vec<String> = Vec::new();
+    let mut since_ms: Option<i64> = None;
     let mut dump_session: Option<String> = None;
     let mut turns_range: Option<String> = None;
     let mut query_args: Vec<&str> = Vec::new();
@@ -914,6 +956,17 @@ fn main() -> Result<()> {
                         let id = id.trim();
                         if !id.is_empty() {
                             exclude_sessions.push(id.to_string());
+                        }
+                    }
+                }
+            }
+            "--since" => {
+                if let Some(val) = iter.next() {
+                    match parse_since(val) {
+                        Some(ms) => since_ms = Some(ms),
+                        None => {
+                            eprintln!("invalid --since value: {val} (use e.g. 24h, 7d, 2w)");
+                            std::process::exit(1);
                         }
                     }
                 }
@@ -968,14 +1021,14 @@ fn main() -> Result<()> {
     } else if !query_args.is_empty() {
         let q = query_args.join(" ");
         if std::io::stdout().is_terminal() {
-            if let Some((sid, path, source)) = search_tui(&db_name, &assets, &q, session_filter.as_deref(), &exclude_sessions)? {
+            if let Some((sid, path, source)) = search_tui(&db_name, &assets, &q, session_filter.as_deref(), &exclude_sessions, since_ms)? {
                 launch_resume(&sid, &path, &source)?;
             }
         } else {
-            search_plain(&db_name, &assets, &q, session_filter.as_deref(), &exclude_sessions)?;
+            search_plain(&db_name, &assets, &q, session_filter.as_deref(), &exclude_sessions, since_ms)?;
         }
     } else {
-        eprintln!("Usage: pickbrain [--session UUID] [--exclude UUID[,UUID,...]] <query>");
+        eprintln!("Usage: pickbrain [--session UUID] [--exclude UUID,...] [--since 24h|7d|2w] <query>");
         eprintln!("       pickbrain --dump <UUID> [--turns N-M]");
         eprintln!("       pickbrain --nuke");
     }

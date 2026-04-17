@@ -45,6 +45,14 @@ pickbrain --exclude <uuid1>,<uuid2> "<query>"
 pickbrain --exclude <uuid1> --exclude <uuid2> "<query>"
 ```
 
+Search only recent history:
+
+```bash
+pickbrain --since 24h "<query>"
+pickbrain --since 7d "<query>"
+pickbrain --since 2w "<query>"
+```
+
 ## Notes
 
 - First run requires a full ingest+embed pass (~7s). Subsequent searches are incremental.
