@@ -29,7 +29,9 @@ static LOGGER: SimpleLogger = SimpleLogger;
 
 fn db_path() -> PathBuf {
     let home = env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".claude/pickbrain.db")
+    let dir = PathBuf::from(home).join(".pickbrain");
+    std::fs::create_dir_all(&dir).ok();
+    dir.join("pickbrain.db")
 }
 
 fn assets_path() -> PathBuf {
@@ -930,6 +932,16 @@ fn main() -> Result<()> {
 
     let db_name = db_path();
     let assets = assets_path();
+
+    // Migrate DB from old location (~/.claude/pickbrain.db)
+    if !db_name.exists() {
+        let home = env::var("HOME").unwrap_or_default();
+        let old_db = PathBuf::from(home).join(".claude/pickbrain.db");
+        if old_db.exists() {
+            eprintln!("migrating database from {} to {}", old_db.display(), db_name.display());
+            std::fs::rename(&old_db, &db_name).ok();
+        }
+    }
 
     match ingest(&db_name) {
         Ok(have_changes) => {

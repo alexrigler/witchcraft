@@ -50,5 +50,5 @@ pickbrain --exclude <uuid1> --exclude <uuid2> "<query>"
 ## Notes
 
 - First run requires a full ingest+embed pass (~7s). Subsequent searches are incremental.
-- The database lives at `~/.claude/pickbrain.db`.
+- The database lives at `~/.pickbrain/pickbrain.db`.
 - Results are ranked by semantic similarity — they may not contain the exact query words.
