@@ -14,11 +14,16 @@ pub struct DB {
     db_fn: PathBuf,
     connection: Option<Connection>,
     remove_on_shutdown: bool,
+    recreated: bool,
 }
 
 impl DB {
     fn conn(&self) -> &Connection {
         self.connection.as_ref().expect("Connection should exist")
+    }
+
+    pub fn was_recreated(&self) -> bool {
+        self.recreated
     }
 
     pub fn new_reader(db_fn: PathBuf) -> SQLResult<Self> {
@@ -28,6 +33,7 @@ impl DB {
             db_fn,
             connection: Some(connection),
             remove_on_shutdown: false,
+            recreated: false,
         })
     }
 
@@ -57,6 +63,7 @@ impl DB {
             )
         };
 
+        let mut recreated = false;
         let connection = if db_ok && schema_ok {
             connection
         } else {
@@ -64,6 +71,7 @@ impl DB {
                 "warp database {} corrupted or schema mismatch, recreating it!",
                 db_fn.display()
             );
+            recreated = !first_creation;
             connection.close().map_err(|(_conn, e)| e)?;
             std::fs::remove_file(&db_fn)
                 .map_err(|_e| rusqlite::Error::InvalidPath(db_fn.clone()))?;
@@ -142,6 +150,7 @@ impl DB {
             db_fn,
             connection: Some(connection),
             remove_on_shutdown: false,
+            recreated,
         })
     }
 

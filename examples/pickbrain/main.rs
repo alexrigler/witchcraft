@@ -90,6 +90,11 @@ fn get_ppid(_pid: i32) -> Option<i32> {
 fn ingest(db_name: &PathBuf, skip_session: Option<&str>, stale_ms: i64) -> Result<bool> {
     let mut db = DB::new(db_name.clone()).unwrap();
 
+    if db.was_recreated() {
+        watermark::remove(&watermark::claude_path());
+        watermark::remove(&watermark::codex_path());
+    }
+
     // Skip the active session only if its source watermark is fresh
     let claude_skip = skip_session
         .filter(|_| watermark::is_fresh(&watermark::claude_path(), stale_ms));
