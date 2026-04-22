@@ -136,6 +136,29 @@ NOTICE that nextest is necessary, simply using "cargo test" will lead
 to random test failures, because individual tests run in the same process,
 leading to "history effects".
 
+## Preparing a PR
+
+Before submitting a PR, please make sure that
+```
+make test
+```
+and
+```
+make nfcorpus
+```
+
+Run, and that
+
+```
+make nfcorpus-score
+```
+
+Runs and scores in the 0.31-0.33 range
+
+NOTICE that nextest is necessary, simply using "cargo test" will lead
+to random test failures, because individual tests run in the same process,
+leading to "history effects".
+
 # License
 
 Unless otherwise noted:

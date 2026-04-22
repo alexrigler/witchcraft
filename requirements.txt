@@ -4,5 +4,5 @@ transformers
 huggingface_hub
 safetensors
 openvino==2026.0.0
-#pytrec_eval # for nfcorpus-score.sh, but breaks on linux
+#pytrec_eval # for nfcorpus-score.sh, but breaks on Windows
 nncf

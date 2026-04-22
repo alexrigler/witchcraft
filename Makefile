@@ -108,17 +108,25 @@ test: download
 bench:
 	cargo run -p t5-bench --release --features hybrid-dequant,ov,fbgemm
 
-# === Dataset targets ===
+%: %.zst
+	zstd -dk $<
 
-nfcorpus:
+nfcorpus: datasets/nfcorpus.tsv
 	make warp-cli EXTRA_FEATURES=deterministic
 	rm -rf mydb.sqlite*
 	$(CLI_BIN) readcsv datasets/nfcorpus.tsv
 	$(CLI_BIN) embed
 	$(CLI_BIN) index
 
-nfcorpus-score: warp-cli
-	$(CLI_BIN) hybridcsv ~/src/xtr-warp/beir/nfcorpus/questions.test.tsv warp-results.txt
+nfcorpus-score: testset/nfcorpus/questions.test.tsv testset/nfcorpus/questions.test.tsv testset/nfcorpus/collection_map.json testset/nfcorpus/qrels.test.json
+	make warp-cli EXTRA_FEATURES=deterministic
+	$(CLI_BIN) hybridcsv testset/nfcorpus/questions.test.tsv warp-results.txt
+	echo ensuring presence of pytrec-eval...
+	uv pip install pytrec-eval 2>/dev/null
+	echo running queries...
+	$(CLI_BIN) querycsv testset/nfcorpus/questions.test.tsv output.txt
+	echo scoring...
+	python score.py output.txt testset/nfcorpus/collection_map.json testset/nfcorpus/qrels.test.json
 
 run: module
 	ln -sf target/release/warp-macos-universal.node warp.node

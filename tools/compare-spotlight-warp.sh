@@ -32,6 +32,9 @@ if ! command -v mdfind &> /dev/null; then
     exit 1
 fi
 
+# Decompress dataset if needed
+[ -f "datasets/nfcorpus.tsv" ] || zstd -dk "datasets/nfcorpus.tsv.zst"
+
 # Check if Warp DB is initialized
 if [ ! -f "mydb.sqlite" ]; then
     echo "Initializing Warp database..."

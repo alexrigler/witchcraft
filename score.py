@@ -4,10 +4,6 @@ import sys
 import pytrec_eval
 
 
-total_recall = 0
-n = 0
-
-
 results_fn = sys.argv[1]
 map_fn = sys.argv[2]
 qrel_fn = sys.argv[3]
