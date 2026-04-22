@@ -120,7 +120,6 @@ nfcorpus: datasets/nfcorpus.tsv
 
 nfcorpus-score: testset/nfcorpus/questions.test.tsv testset/nfcorpus/questions.test.tsv testset/nfcorpus/collection_map.json testset/nfcorpus/qrels.test.json
 	make warp-cli EXTRA_FEATURES=deterministic
-	$(CLI_BIN) hybridcsv testset/nfcorpus/questions.test.tsv warp-results.txt
 	echo ensuring presence of pytrec-eval...
 	uv pip install pytrec-eval 2>/dev/null
 	echo running queries...
